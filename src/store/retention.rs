@@ -23,7 +23,7 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::error::{Error, Result};
 
-use super::Store;
+use super::{RowRead, Store};
 
 /// Seconds a minute bucket must be closed before it is aggregated.
 pub const ROLLUP_SETTLE_SECS: i64 = 120;
@@ -256,7 +256,7 @@ pub fn prune(
             cutoff = match cutoff {
                 value if value == now_wall_ns - HOUR_NS => now_wall_ns - 24 * HOUR_NS,
                 value if value == now_wall_ns - 24 * HOUR_NS => now_wall_ns - 6 * HOUR_NS,
-                value => now_wall_ns - 2 * 24 * HOUR_NS,
+                _ => now_wall_ns - 2 * 24 * HOUR_NS,
             };
         }
     }
@@ -419,20 +419,20 @@ fn rollup_host(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Result<
             let current = HostRaw {
                 boot: row.get(0).map_err(storage)?,
                 wall: row.get(1).map_err(storage)?,
-                user: row.get(2).map_err(storage)?,
-                nice: row.get(3).map_err(storage)?,
-                system: row.get(4).map_err(storage)?,
-                idle: row.get(5).map_err(storage)?,
-                iowait: row.get(6).map_err(storage)?,
-                irq: row.get(7).map_err(storage)?,
-                softirq: row.get(8).map_err(storage)?,
-                steal: row.get(9).map_err(storage)?,
-                mem_total: row.get(10).map_err(storage)?,
-                mem_available: row.get(11).map_err(storage)?,
-                net_rx: row.get(12).map_err(storage)?,
-                net_tx: row.get(13).map_err(storage)?,
-                disk_read: row.get(14).map_err(storage)?,
-                disk_write: row.get(15).map_err(storage)?,
+                user: row.u64_at(2)?,
+                nice: row.u64_at(3)?,
+                system: row.u64_at(4)?,
+                idle: row.u64_at(5)?,
+                iowait: row.u64_at(6)?,
+                irq: row.u64_at(7)?,
+                softirq: row.u64_at(8)?,
+                steal: row.u64_at(9)?,
+                mem_total: row.opt_u64_at(10)?,
+                mem_available: row.opt_u64_at(11)?,
+                net_rx: row.opt_u64_at(12)?,
+                net_tx: row.opt_u64_at(13)?,
+                disk_read: row.opt_u64_at(14)?,
+                disk_write: row.opt_u64_at(15)?,
                 psi_cpu: row.get(16).map_err(storage)?,
                 psi_mem: row.get(17).map_err(storage)?,
                 psi_io: row.get(18).map_err(storage)?,
@@ -450,7 +450,9 @@ fn rollup_host(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Result<
             let pct = busy as f64 * 100.0 / total as f64;
             let cpu_usec = busy.saturating_mul(1_000_000) / policy.clock_ticks_per_second;
             let memory = match (current.mem_total, current.mem_available) {
-                (total, Some(available)) if total > 0 => Some(total.saturating_sub(available)),
+                (Some(mem_total), Some(available)) if mem_total > 0 => {
+                    Some(mem_total.saturating_sub(available))
+                }
                 _ => None,
             };
             let bucket = bucket_of(current.wall, MINUTE_NS);
@@ -573,8 +575,8 @@ fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Resu
         {
             let entity_id: String = row.get(0).map_err(storage)?;
             let wall: i64 = row.get(1).map_err(storage)?;
-            let cpu: Option<u64> = row.get(2).map_err(storage)?;
-            let memory: Option<u64> = row.get(3).map_err(storage)?;
+            let cpu: Option<u64> = row.opt_u64_at(2)?;
+            let memory: Option<u64> = row.opt_u64_at(3)?;
             let io_json: Option<String> = row.get(4).map_err(storage)?;
             let psi_cpu: Option<f64> = row.get(5).map_err(storage)?;
             let psi_mem: Option<f64> = row.get(6).map_err(storage)?;
@@ -926,10 +928,10 @@ mod tests {
     use super::*;
     use crate::model::{
         CgroupSample, CpuTimes, EventKind, EventRecord, HostSample, LogRecord, LogStream,
-        MemSnapshot, Severity, Stamps,
+        MemSnapshot, Severity,
     };
     use crate::store::{Store, WriteItem, WriteRecord};
-    use crate::time::ClockDomain;
+    use crate::time::{ClockDomain, Stamps};
 
     fn stamps(wall: i64, mono: i64) -> Stamps {
         Stamps::new(wall, mono, "boot-a", ClockDomain::Simulated)
@@ -990,7 +992,7 @@ mod tests {
         let mut store = Store::open_in_memory().expect("store");
         let now = 10 * HOUR_NS;
         write_host_run(&mut store, now - 20 * 60 * 1_000_000_000, 18);
-        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent"));
+        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent")).expect("prune");
         assert!(report.host_rollup_rows >= 1, "expected rollups: {report:?}");
         let avg: Option<f64> = store
             .connection()
@@ -1014,7 +1016,7 @@ mod tests {
         write_host_run(&mut store, now - 3 * HOUR_NS, 3);
         // Recent samples (20 min) are kept.
         write_host_run(&mut store, now - 20 * 60 * 1_000_000_000, 18);
-        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent"));
+        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent")).expect("prune");
         assert!(report.deleted_host_samples >= 4, "{report:?}");
         let remaining: i64 = store
             .connection()
@@ -1034,13 +1036,13 @@ mod tests {
         let now = 5 * HOUR_NS;
         write_host_run(&mut store, now - 20 * 60 * 1_000_000_000, 18);
         let policy = policy(100);
-        let first = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent"));
+        let first = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent")).expect("prune");
         assert!(first.host_rollup_rows >= 1);
         let count_first: i64 = store
             .connection()
             .query_row("SELECT COUNT(*) FROM rollup_1m", [], |row| row.get(0))
             .expect("count");
-        let second = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent"));
+        let second = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent")).expect("prune");
         assert_eq!(second.host_rollup_rows, 0, "no new buckets on rerun");
         let count_second: i64 = store
             .connection()
@@ -1076,7 +1078,7 @@ mod tests {
             )));
         }
         store.write(&items).expect("write");
-        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent"));
+        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent")).expect("prune");
         assert!(report.cgroup_rollup_rows >= 1, "{report:?}");
         let (avg, total, io_read): (Option<f64>, i64, i64) = store
             .connection()
@@ -1132,7 +1134,7 @@ mod tests {
             })),
         ];
         store.write(&items).expect("write");
-        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent"));
+        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent")).expect("prune");
         let incident_logs: i64 = store
             .connection()
             .query_row("SELECT COUNT(*) FROM logs WHERE incident_id = 1", [], |row| {
@@ -1162,7 +1164,7 @@ mod tests {
         let mut policy = policy(100);
         policy.raw_hours = 3;
         write_host_run(&mut store, now - 2 * HOUR_NS, 12);
-        let report = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent"));
+        let report = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent")).expect("prune");
         assert!(report.hour_rollup_rows >= 1, "{report:?}");
         let samples: i64 = store
             .connection()
@@ -1182,7 +1184,7 @@ mod tests {
 
     #[test]
     fn policy_from_config_uses_megabyte_budget() {
-        let config = crate::config::Config::default();
+        let config = Config::default();
         let policy = RetentionPolicy::from_config(&config, 100);
         assert_eq!(policy.max_db_bytes, 100 * 1024 * 1024);
         assert_eq!(policy.clock_ticks_per_second, 100);

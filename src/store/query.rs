@@ -20,6 +20,8 @@ use crate::model::{
 };
 use crate::time::format_wall_rfc3339;
 
+use super::RowRead;
+
 /// Half-open wall-clock window `[since, until)` in nanoseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
@@ -405,7 +407,7 @@ pub struct DbStats {
     pub architecture: Option<String>,
 }
 
-fn sql(err: rusqlite::Error) -> Error {
+fn db_err(err: rusqlite::Error) -> Error {
     Error::Storage(format!("query failed: {err}"))
 }
 
@@ -447,7 +449,7 @@ pub fn db_stats(conn: &Connection) -> Result<DbStats> {
     ] {
         let count: i64 = conn
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
-            .map_err(sql)?;
+            .map_err(db_err)?;
         stats.counts.insert(table.to_string(), count);
     }
     stats.earliest_wall_ns = conn
@@ -461,7 +463,7 @@ pub fn db_stats(conn: &Connection) -> Result<DbStats> {
             [],
             |row| row.get::<_, Option<i64>>(0),
         )
-        .map_err(sql)?;
+        .map_err(db_err)?;
     stats.latest_wall_ns = conn
         .query_row(
             "SELECT MAX(ts) FROM (
@@ -473,12 +475,12 @@ pub fn db_stats(conn: &Connection) -> Result<DbStats> {
             [],
             |row| row.get::<_, Option<i64>>(0),
         )
-        .map_err(sql)?;
+        .map_err(db_err)?;
     stats.max_incident_id = conn
         .query_row("SELECT COALESCE(MAX(incident_id), 0) FROM incidents", [], |row| {
             row.get(0)
         })
-        .map_err(sql)?;
+        .map_err(db_err)?;
     if let Some((hostname, boot, kernel, arch)) = conn
         .query_row(
             "SELECT hostname, boot_id, kernel_release, architecture FROM hosts
@@ -494,7 +496,7 @@ pub fn db_stats(conn: &Connection) -> Result<DbStats> {
             },
         )
         .optional()
-        .map_err(sql)?
+        .map_err(db_err)?
     {
         stats.hostname = hostname;
         stats.boot_id = boot;
@@ -533,21 +535,21 @@ pub fn host_series(conn: &Connection, window: Window) -> Result<Vec<HostSeriesPo
               WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2
               ORDER BY boot_id, mono_ts_ns",
         )
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut rows = statement
         .query(params![window.since, window.until])
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut points = Vec::new();
     let mut previous: Option<Raw> = None;
-    while let Some(row) = rows.next().map_err(sql)? {
-        let user: u64 = row.get(1).map_err(sql)?;
-        let nice: u64 = row.get(2).map_err(sql)?;
-        let system: u64 = row.get(3).map_err(sql)?;
-        let idle: u64 = row.get(4).map_err(sql)?;
-        let iowait: u64 = row.get(5).map_err(sql)?;
-        let irq: u64 = row.get(6).map_err(sql)?;
-        let softirq: u64 = row.get(7).map_err(sql)?;
-        let steal: u64 = row.get(8).map_err(sql)?;
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let user = row.u64_at(1)?;
+        let nice = row.u64_at(2)?;
+        let system = row.u64_at(3)?;
+        let idle = row.u64_at(4)?;
+        let iowait = row.u64_at(5)?;
+        let irq = row.u64_at(6)?;
+        let softirq = row.u64_at(7)?;
+        let steal = row.u64_at(8)?;
         let total = user
             .saturating_add(nice)
             .saturating_add(system)
@@ -557,19 +559,19 @@ pub fn host_series(conn: &Connection, window: Window) -> Result<Vec<HostSeriesPo
             .saturating_add(softirq)
             .saturating_add(steal);
         let current = Raw {
-            wall: row.get(0).map_err(sql)?,
+            wall: row.get(0).map_err(db_err)?,
             total,
             busy: total.saturating_sub(idle).saturating_sub(iowait),
-            mem_total: row.get(9).map_err(sql)?,
-            mem_available: row.get(10).map_err(sql)?,
-            psi_cpu: row.get(11).map_err(sql)?,
-            psi_memory: row.get(12).map_err(sql)?,
-            psi_io: row.get(13).map_err(sql)?,
-            load1: row.get(14).map_err(sql)?,
-            net_rx: row.get(15).map_err(sql)?,
-            net_tx: row.get(16).map_err(sql)?,
-            disk_read: row.get(17).map_err(sql)?,
-            disk_write: row.get(18).map_err(sql)?,
+            mem_total: row.opt_u64_at(9)?,
+            mem_available: row.opt_u64_at(10)?,
+            psi_cpu: row.get(11).map_err(db_err)?,
+            psi_memory: row.get(12).map_err(db_err)?,
+            psi_io: row.get(13).map_err(db_err)?,
+            load1: row.get(14).map_err(db_err)?,
+            net_rx: row.opt_u64_at(15)?,
+            net_tx: row.opt_u64_at(16)?,
+            disk_read: row.opt_u64_at(17)?,
+            disk_write: row.opt_u64_at(18)?,
         };
         let Some(previous) = previous.replace(current.clone()) else {
             continue;
@@ -583,7 +585,9 @@ pub fn host_series(conn: &Connection, window: Window) -> Result<Vec<HostSeriesPo
             None
         };
         let mem_used = match (current.mem_total, current.mem_available) {
-            (total, Some(available)) if total > 0 => Some(total.saturating_sub(available)),
+            (Some(total), Some(available)) if total > 0 => {
+                Some(total.saturating_sub(available))
+            }
             _ => None,
         };
         let rate = |now: Option<u64>, before: Option<u64>| -> Option<f64> {
@@ -653,7 +657,7 @@ pub fn host_usage(conn: &Connection, window: Window) -> Result<Option<EntityUsag
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(sql)?
+        .map_err(db_err)?
         .unwrap_or_else(|| "host".to_string());
     Ok(Some(EntityUsage {
         entity_id: "host:latest".to_string(),
@@ -711,21 +715,21 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
                   WHERE bucket_wall_ns >= ?1 AND bucket_wall_ns < ?2
                     AND entity_kind = 'cgroup'",
             )
-            .map_err(sql)?;
+            .map_err(db_err)?;
         let mut rows = statement
             .query(params![window.since, window.until])
-            .map_err(sql)?;
-        while let Some(row) = rows.next().map_err(sql)? {
-            let entity_id: String = row.get(0).map_err(sql)?;
-            let bucket: i64 = row.get(1).map_err(sql)?;
-            let samples = row.get::<_, Option<i64>>(2).map_err(sql)?.unwrap_or(0).max(0) as u64;
-            let cpu_avg: Option<f64> = row.get(3).map_err(sql)?;
-            let cpu_max: Option<f64> = row.get(4).map_err(sql)?;
-            let cpu_total: Option<i64> = row.get(5).map_err(sql)?;
-            let mem_avg: Option<i64> = row.get(6).map_err(sql)?;
-            let mem_max: Option<i64> = row.get(7).map_err(sql)?;
-            let io_read: Option<i64> = row.get(8).map_err(sql)?;
-            let io_write: Option<i64> = row.get(9).map_err(sql)?;
+            .map_err(db_err)?;
+        while let Some(row) = rows.next().map_err(db_err)? {
+            let entity_id: String = row.get(0).map_err(db_err)?;
+            let bucket: i64 = row.get(1).map_err(db_err)?;
+            let samples = row.get::<_, Option<i64>>(2).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+            let cpu_avg: Option<f64> = row.get(3).map_err(db_err)?;
+            let cpu_max: Option<f64> = row.get(4).map_err(db_err)?;
+            let cpu_total: Option<i64> = row.get(5).map_err(db_err)?;
+            let mem_avg: Option<i64> = row.get(6).map_err(db_err)?;
+            let mem_max: Option<i64> = row.get(7).map_err(db_err)?;
+            let io_read: Option<i64> = row.get(8).map_err(db_err)?;
+            let io_write: Option<i64> = row.get(9).map_err(db_err)?;
             let overlap = window.overlap_ns(bucket, bucket + crate::store::retention::MINUTE_NS);
             if overlap <= 0 {
                 continue;
@@ -835,13 +839,13 @@ type EntityMeta = HashMap<String, (String, HashMap<String, String>)>;
 fn entity_metadata(conn: &Connection, kind: EntityKind) -> Result<EntityMeta> {
     let mut statement = conn
         .prepare("SELECT entity_id, name, labels_json FROM entities WHERE kind = ?1")
-        .map_err(sql)?;
-    let mut rows = statement.query(params![kind.as_str()]).map_err(sql)?;
+        .map_err(db_err)?;
+    let mut rows = statement.query(params![kind.as_str()]).map_err(db_err)?;
     let mut map = EntityMeta::new();
-    while let Some(row) = rows.next().map_err(sql)? {
-        let entity_id: String = row.get(0).map_err(sql)?;
-        let name: String = row.get(1).map_err(sql)?;
-        let labels_json: Option<String> = row.get(2).map_err(sql)?;
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let entity_id: String = row.get(0).map_err(db_err)?;
+        let name: String = row.get(1).map_err(db_err)?;
+        let labels_json: Option<String> = row.get(2).map_err(db_err)?;
         let labels: HashMap<String, String> = labels_json
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
@@ -869,19 +873,19 @@ fn lifetime_metadata(conn: &Connection, ids: &[String]) -> Result<HashMap<String
             "SELECT process_instance_id, comm, executable, tool, role, container
                FROM process_lifetimes WHERE process_instance_id IN ({placeholders})"
         );
-        let mut statement = conn.prepare(&sql).map_err(sql)?;
+        let mut statement = conn.prepare(&sql).map_err(db_err)?;
         let mut rows = statement
             .query(rusqlite::params_from_iter(chunk.iter()))
-            .map_err(sql)?;
-        while let Some(row) = rows.next().map_err(sql)? {
+            .map_err(db_err)?;
+        while let Some(row) = rows.next().map_err(db_err)? {
             map.insert(
-                row.get(0).map_err(sql)?,
+                row.get(0).map_err(db_err)?,
                 LifetimeMeta {
-                    comm: row.get(1).map_err(sql)?,
-                    executable: row.get(2).map_err(sql)?,
-                    tool: row.get(3).map_err(sql)?,
-                    role: row.get(4).map_err(sql)?,
-                    container: row.get(5).map_err(sql)?,
+                    comm: row.get(1).map_err(db_err)?,
+                    executable: row.get(2).map_err(db_err)?,
+                    tool: row.get(3).map_err(db_err)?,
+                    role: row.get(4).map_err(db_err)?,
+                    container: row.get(5).map_err(db_err)?,
                 },
             );
         }
@@ -915,19 +919,19 @@ fn process_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> 
                   WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2
                   ORDER BY process_instance_id, mono_ts_ns",
             )
-            .map_err(sql)?;
+            .map_err(db_err)?;
         let mut rows = statement
             .query(params![window.since, window.until])
-            .map_err(sql)?;
-        while let Some(row) = rows.next().map_err(sql)? {
-            let entity_id: String = row.get(0).map_err(sql)?;
-            let wall: i64 = row.get(1).map_err(sql)?;
-            let user: u64 = row.get::<_, Option<i64>>(2).map_err(sql)?.unwrap_or(0).max(0) as u64;
-            let system: u64 = row.get::<_, Option<i64>>(3).map_err(sql)?.unwrap_or(0).max(0) as u64;
+            .map_err(db_err)?;
+        while let Some(row) = rows.next().map_err(db_err)? {
+            let entity_id: String = row.get(0).map_err(db_err)?;
+            let wall: i64 = row.get(1).map_err(db_err)?;
+            let user: u64 = row.get::<_, Option<i64>>(2).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+            let system: u64 = row.get::<_, Option<i64>>(3).map_err(db_err)?.unwrap_or(0).max(0) as u64;
             let ticks = user.saturating_add(system);
-            let rss: Option<i64> = row.get(4).map_err(sql)?;
-            let read: Option<i64> = row.get(5).map_err(sql)?;
-            let write: Option<i64> = row.get(6).map_err(sql)?;
+            let rss: Option<i64> = row.get(4).map_err(db_err)?;
+            let read: Option<i64> = row.get(5).map_err(db_err)?;
+            let write: Option<i64> = row.get(6).map_err(db_err)?;
             let slot = accumulators.entry(entity_id).or_default();
             if slot.samples == 0 {
                 slot.first_wall = wall;
@@ -1025,7 +1029,7 @@ pub fn clock_ticks_per_second(conn: &Connection) -> Result<u64> {
             |row| row.get(0),
         )
         .optional()
-        .map_err(sql)?;
+        .map_err(db_err)?;
     Ok(value
         .and_then(|text| text.parse::<u64>().ok())
         .filter(|value| *value > 0)
@@ -1051,20 +1055,20 @@ pub fn entity_series(
               WHERE process_instance_id = ?1 AND wall_ts_ns >= ?2 AND wall_ts_ns < ?3
               ORDER BY mono_ts_ns",
         )
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut rows = statement
         .query(params![entity_id, window.since, window.until])
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut points = Vec::new();
     let mut previous: Option<(i64, u64, Option<u64>, Option<u64>)> = None;
-    while let Some(row) = rows.next().map_err(sql)? {
-        let wall: i64 = row.get(0).map_err(sql)?;
-        let user: u64 = row.get::<_, Option<i64>>(1).map_err(sql)?.unwrap_or(0).max(0) as u64;
-        let system: u64 = row.get::<_, Option<i64>>(2).map_err(sql)?.unwrap_or(0).max(0) as u64;
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let wall: i64 = row.get(0).map_err(db_err)?;
+        let user: u64 = row.get::<_, Option<i64>>(1).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+        let system: u64 = row.get::<_, Option<i64>>(2).map_err(db_err)?.unwrap_or(0).max(0) as u64;
         let cpu = user.saturating_add(system);
-        let rss: Option<i64> = row.get(3).map_err(sql)?;
-        let read: Option<i64> = row.get(4).map_err(sql)?;
-        let write: Option<i64> = row.get(5).map_err(sql)?;
+        let rss: Option<i64> = row.get(3).map_err(db_err)?;
+        let read: Option<i64> = row.get(4).map_err(db_err)?;
+        let write: Option<i64> = row.get(5).map_err(db_err)?;
         let current = (
             wall,
             cpu,
@@ -1113,19 +1117,19 @@ fn cgroup_series(
               WHERE entity_id = ?1 AND bucket_wall_ns >= ?2 AND bucket_wall_ns < ?3
               ORDER BY bucket_wall_ns",
         )
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut rows = statement
         .query(params![entity_id, window.since, window.until])
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let duration_s = crate::store::retention::MINUTE_NS as f64 / 1e9;
-    while let Some(row) = rows.next().map_err(sql)? {
-        let bucket: i64 = row.get(0).map_err(sql)?;
-        let cpu_avg: Option<f64> = row.get(1).map_err(sql)?;
-        let cpu_total: Option<i64> = row.get(2).map_err(sql)?;
-        let mem: Option<i64> = row.get(3).map_err(sql)?;
-        let io_read: Option<i64> = row.get(4).map_err(sql)?;
-        let io_write: Option<i64> = row.get(5).map_err(sql)?;
-        let _samples: Option<i64> = row.get(6).map_err(sql)?;
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let bucket: i64 = row.get(0).map_err(db_err)?;
+        let cpu_avg: Option<f64> = row.get(1).map_err(db_err)?;
+        let cpu_total: Option<i64> = row.get(2).map_err(db_err)?;
+        let mem: Option<i64> = row.get(3).map_err(db_err)?;
+        let io_read: Option<i64> = row.get(4).map_err(db_err)?;
+        let io_write: Option<i64> = row.get(5).map_err(db_err)?;
+        let _samples: Option<i64> = row.get(6).map_err(db_err)?;
         points.push(EntitySeriesPoint {
             wall_ns: bucket,
             cpu_pct: cpu_avg.or_else(|| {
@@ -1200,18 +1204,18 @@ pub fn buckets(
                   WHERE bucket_wall_ns >= ?1 AND bucket_wall_ns < ?2
                     AND entity_kind = 'cgroup'",
             )
-            .map_err(sql)?;
+            .map_err(db_err)?;
         let mut rows = statement
             .query(params![window.since, window.until])
-            .map_err(sql)?;
+            .map_err(db_err)?;
         let bucket_s = bucket_ns as f64 / 1e9;
-        while let Some(row) = rows.next().map_err(sql)? {
-            let entity_id: String = row.get(0).map_err(sql)?;
-            let wall: i64 = row.get(1).map_err(sql)?;
-            let cpu_total: Option<i64> = row.get(2).map_err(sql)?;
-            let mem: Option<i64> = row.get(3).map_err(sql)?;
-            let io_read: Option<i64> = row.get(4).map_err(sql)?;
-            let io_write: Option<i64> = row.get(5).map_err(sql)?;
+        while let Some(row) = rows.next().map_err(db_err)? {
+            let entity_id: String = row.get(0).map_err(db_err)?;
+            let wall: i64 = row.get(1).map_err(db_err)?;
+            let cpu_total: Option<i64> = row.get(2).map_err(db_err)?;
+            let mem: Option<i64> = row.get(3).map_err(db_err)?;
+            let io_read: Option<i64> = row.get(4).map_err(db_err)?;
+            let io_write: Option<i64> = row.get(5).map_err(db_err)?;
             let start = bucket_start(wall);
             let cpu_usec = cpu_total.unwrap_or(0).max(0) as u64;
             let (name, container) = match cgroup_names.get(&entity_id) {
@@ -1253,23 +1257,23 @@ pub fn buckets(
                   WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2
                   ORDER BY process_instance_id, mono_ts_ns",
             )
-            .map_err(sql)?;
+            .map_err(db_err)?;
         let mut rows = statement
             .query(params![window.since, window.until])
-            .map_err(sql)?;
+            .map_err(db_err)?;
         let hz = clock_ticks_per_second(conn)?;
         let bucket_s = bucket_ns as f64 / 1e9;
         let mut previous: HashMap<String, (i64, u64, u64, u64)> = HashMap::new();
         let mut seen: Vec<String> = Vec::new();
-        while let Some(row) = rows.next().map_err(sql)? {
-            let entity_id: String = row.get(0).map_err(sql)?;
-            let wall: i64 = row.get(1).map_err(sql)?;
-            let user: u64 = row.get::<_, Option<i64>>(2).map_err(sql)?.unwrap_or(0).max(0) as u64;
-            let system: u64 = row.get::<_, Option<i64>>(3).map_err(sql)?.unwrap_or(0).max(0) as u64;
+        while let Some(row) = rows.next().map_err(db_err)? {
+            let entity_id: String = row.get(0).map_err(db_err)?;
+            let wall: i64 = row.get(1).map_err(db_err)?;
+            let user: u64 = row.get::<_, Option<i64>>(2).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+            let system: u64 = row.get::<_, Option<i64>>(3).map_err(db_err)?.unwrap_or(0).max(0) as u64;
             let ticks = user.saturating_add(system);
-            let rss: Option<i64> = row.get(4).map_err(sql)?;
-            let read: u64 = row.get::<_, Option<i64>>(5).map_err(sql)?.unwrap_or(0).max(0) as u64;
-            let write: u64 = row.get::<_, Option<i64>>(6).map_err(sql)?.unwrap_or(0).max(0) as u64;
+            let rss: Option<i64> = row.get(4).map_err(db_err)?;
+            let read: u64 = row.get::<_, Option<i64>>(5).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+            let write: u64 = row.get::<_, Option<i64>>(6).map_err(db_err)?.unwrap_or(0).max(0) as u64;
             let start = bucket_start(wall);
             if let Some((previous_wall, previous_ticks, previous_read, previous_write)) =
                 previous.insert(entity_id.clone(), (wall, ticks, read, write))
@@ -1470,12 +1474,12 @@ pub fn incidents(conn: &Connection, window: Window, limit: usize) -> Result<Vec<
               WHERE started_wall_ns < ?2 AND (ended_wall_ns IS NULL OR ended_wall_ns >= ?1)
               ORDER BY started_wall_ns DESC LIMIT ?3",
         )
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut rows = statement
         .query(params![window.since, window.until, limit.max(1) as i64])
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut incidents = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
+    while let Some(row) = rows.next().map_err(db_err)? {
         incidents.push(incident_from_row(row)?);
     }
     Ok(incidents)
@@ -1489,32 +1493,32 @@ pub fn all_incidents(conn: &Connection, limit: usize) -> Result<Vec<Incident>> {
                     peak, baseline, evidence_json, acknowledged, evidence_loss
                FROM incidents ORDER BY started_wall_ns DESC LIMIT ?1",
         )
-        .map_err(sql)?;
-    let mut rows = statement.query(params![limit.max(1) as i64]).map_err(sql)?;
+        .map_err(db_err)?;
+    let mut rows = statement.query(params![limit.max(1) as i64]).map_err(db_err)?;
     let mut incidents = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
+    while let Some(row) = rows.next().map_err(db_err)? {
         incidents.push(incident_from_row(row)?);
     }
     Ok(incidents)
 }
 
 fn incident_from_row(row: &rusqlite::Row<'_>) -> Result<Incident> {
-    let metric: String = row.get(4).map_err(sql)?;
-    let evidence_json: Option<String> = row.get(8).map_err(sql)?;
+    let metric: String = row.get(4).map_err(db_err)?;
+    let evidence_json: Option<String> = row.get(8).map_err(db_err)?;
     Ok(Incident {
-        incident_id: Some(row.get(0).map_err(sql)?),
-        started_wall_ns: row.get(1).map_err(sql)?,
-        ended_wall_ns: row.get(2).map_err(sql)?,
-        entity_id: row.get(3).map_err(sql)?,
+        incident_id: Some(row.get(0).map_err(db_err)?),
+        started_wall_ns: row.get(1).map_err(db_err)?,
+        ended_wall_ns: row.get(2).map_err(db_err)?,
+        entity_id: row.get(3).map_err(db_err)?,
         metric: Metric::parse(&metric).unwrap_or(Metric::Cpu),
-        reason: row.get(5).map_err(sql)?,
-        peak: row.get(6).map_err(sql)?,
-        baseline: row.get(7).map_err(sql)?,
+        reason: row.get(5).map_err(db_err)?,
+        peak: row.get(6).map_err(db_err)?,
+        baseline: row.get(7).map_err(db_err)?,
         evidence: evidence_json
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or(serde_json::Value::Null),
-        acknowledged: row.get(9).map_err(sql)?,
-        evidence_loss: row.get(10).map_err(sql)?,
+        acknowledged: row.get(9).map_err(db_err)?,
+        evidence_loss: row.get(10).map_err(db_err)?,
     })
 }
 
@@ -1526,9 +1530,9 @@ pub fn incident(conn: &Connection, incident_id: i64) -> Result<Option<Incident>>
                     peak, baseline, evidence_json, acknowledged, evidence_loss
                FROM incidents WHERE incident_id = ?1",
         )
-        .map_err(sql)?;
-    let mut rows = statement.query(params![incident_id]).map_err(sql)?;
-    match rows.next().map_err(sql)? {
+        .map_err(db_err)?;
+    let mut rows = statement.query(params![incident_id]).map_err(db_err)?;
+    match rows.next().map_err(db_err)? {
         Some(row) => Ok(Some(incident_from_row(row)?)),
         None => Ok(None),
     }
@@ -1578,27 +1582,27 @@ pub fn logs(conn: &Connection, filter: &LogFilter) -> Result<Vec<LogRecord>> {
     }
     sql.push_str(" ORDER BY wall_ts_ns DESC LIMIT ?");
     values.push((filter.limit.clamp(1, 100_000) as i64).into());
-    let mut statement = conn.prepare(&sql).map_err(sql)?;
+    let mut statement = conn.prepare(&sql).map_err(db_err)?;
     let mut rows = statement
         .query(rusqlite::params_from_iter(values))
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut records = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
+    while let Some(row) = rows.next().map_err(db_err)? {
         records.push(LogRecord {
-            wall_ns: row.get(0).map_err(sql)?,
-            mono_ns: row.get(1).map_err(sql)?,
-            source_id: row.get(3).map_err(sql)?,
-            entity_id: row.get(2).map_err(sql)?,
-            stream: parse_stream(&row.get::<_, String>(4).map_err(sql)?),
+            wall_ns: row.get(0).map_err(db_err)?,
+            mono_ns: row.get(1).map_err(db_err)?,
+            source_id: row.get(3).map_err(db_err)?,
+            entity_id: row.get(2).map_err(db_err)?,
+            stream: parse_stream(&row.get::<_, String>(4).map_err(db_err)?),
             level: row
                 .get::<_, Option<String>>(5)
-                .map_err(sql)?
+                .map_err(db_err)?
                 .as_deref()
                 .and_then(Severity::parse),
-            message: row.get(6).map_err(sql)?,
-            truncated: row.get(7).map_err(sql)?,
-            incident_id: row.get(9).map_err(sql)?,
-            redacted: row.get(8).map_err(sql)?,
+            message: row.get(6).map_err(db_err)?,
+            truncated: row.get(7).map_err(db_err)?,
+            incident_id: row.get(9).map_err(db_err)?,
+            redacted: row.get(8).map_err(db_err)?,
         });
     }
     Ok(records)
@@ -1619,7 +1623,7 @@ pub fn events(conn: &Connection, filter: &EventFilter) -> Result<Vec<EventRecord
                 AND (?3 IS NULL OR entity_id = ?3)
               ORDER BY wall_ts_ns DESC LIMIT ?4",
         )
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut rows = statement
         .query(params![
             window.since,
@@ -1627,27 +1631,27 @@ pub fn events(conn: &Connection, filter: &EventFilter) -> Result<Vec<EventRecord
             filter.entity_id,
             filter.limit.clamp(1, 100_000) as i64
         ])
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut records = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
-        let kind: String = row.get(3).map_err(sql)?;
-        let severity: String = row.get(4).map_err(sql)?;
-        let payload_json: Option<String> = row.get(5).map_err(sql)?;
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let kind: String = row.get(3).map_err(db_err)?;
+        let severity: String = row.get(4).map_err(db_err)?;
+        let payload_json: Option<String> = row.get(5).map_err(db_err)?;
         let parsed_kind = EventKind::parse(&kind).unwrap_or(EventKind::ServiceEvent);
         if !filter.kinds.is_empty() && !filter.kinds.contains(&parsed_kind) {
             continue;
         }
         records.push(EventRecord {
-            wall_ns: row.get(0).map_err(sql)?,
-            mono_ns: row.get(1).map_err(sql)?,
-            entity_id: row.get(2).map_err(sql)?,
+            wall_ns: row.get(0).map_err(db_err)?,
+            mono_ns: row.get(1).map_err(db_err)?,
+            entity_id: row.get(2).map_err(db_err)?,
             kind: parsed_kind,
             severity: Severity::parse(&severity).unwrap_or(Severity::Info),
             payload: payload_json
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or(serde_json::Value::Null),
-            provenance: row.get(6).map_err(sql)?,
-            lost_before: row.get::<_, i64>(7).map_err(sql)?.max(0) as u64,
+            provenance: row.get(6).map_err(db_err)?,
+            lost_before: row.get::<_, i64>(7).map_err(db_err)?.max(0) as u64,
         });
     }
     Ok(records)
@@ -1668,30 +1672,30 @@ pub fn lifetimes(
               WHERE start_wall_ns < ?2 AND (end_wall_ns IS NULL OR end_wall_ns >= ?1)
               ORDER BY start_wall_ns ASC LIMIT ?3",
         )
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut rows = statement
         .query(params![window.since, window.until, limit.max(1) as i64])
-        .map_err(sql)?;
+        .map_err(db_err)?;
     let mut lifetimes = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
+    while let Some(row) = rows.next().map_err(db_err)? {
         lifetimes.push(LifetimeSummary {
-            process_instance_id: row.get(0).map_err(sql)?,
-            host_pid: row.get::<_, i64>(1).map_err(sql)?.max(0) as u32,
-            parent_process_instance_id: row.get(2).map_err(sql)?,
+            process_instance_id: row.get(0).map_err(db_err)?,
+            host_pid: row.get::<_, i64>(1).map_err(db_err)?.max(0) as u32,
+            parent_process_instance_id: row.get(2).map_err(db_err)?,
             parent_host_pid: row
                 .get::<_, Option<i64>>(3)
-                .map_err(sql)?
+                .map_err(db_err)?
                 .map(|value| value.max(0) as u32),
-            comm: row.get(4).map_err(sql)?,
-            executable: row.get(5).map_err(sql)?,
-            tool: row.get(6).map_err(sql)?,
-            role: row.get(7).map_err(sql)?,
-            unit: row.get(8).map_err(sql)?,
-            container: row.get(9).map_err(sql)?,
-            session: row.get(10).map_err(sql)?,
-            start_wall_ns: row.get(11).map_err(sql)?,
-            end_wall_ns: row.get(12).map_err(sql)?,
-            end_reason: row.get(13).map_err(sql)?,
+            comm: row.get(4).map_err(db_err)?,
+            executable: row.get(5).map_err(db_err)?,
+            tool: row.get(6).map_err(db_err)?,
+            role: row.get(7).map_err(db_err)?,
+            unit: row.get(8).map_err(db_err)?,
+            container: row.get(9).map_err(db_err)?,
+            session: row.get(10).map_err(db_err)?,
+            start_wall_ns: row.get(11).map_err(db_err)?,
+            end_wall_ns: row.get(12).map_err(db_err)?,
+            end_reason: row.get(13).map_err(db_err)?,
         });
     }
     Ok(lifetimes)
@@ -1704,17 +1708,17 @@ pub fn runs(conn: &Connection, limit: usize) -> Result<Vec<RunSummary>> {
             "SELECT run_id, started_wall_ns, stopped_wall_ns, version, simulated, note
                FROM runs ORDER BY run_id DESC LIMIT ?1",
         )
-        .map_err(sql)?;
-    let mut rows = statement.query(params![limit.max(1) as i64]).map_err(sql)?;
+        .map_err(db_err)?;
+    let mut rows = statement.query(params![limit.max(1) as i64]).map_err(db_err)?;
     let mut runs = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
+    while let Some(row) = rows.next().map_err(db_err)? {
         runs.push(RunSummary {
-            run_id: row.get(0).map_err(sql)?,
-            started_wall_ns: row.get(1).map_err(sql)?,
-            stopped_wall_ns: row.get(2).map_err(sql)?,
-            version: row.get(3).map_err(sql)?,
-            simulated: row.get(4).map_err(sql)?,
-            note: row.get(5).map_err(sql)?,
+            run_id: row.get(0).map_err(db_err)?,
+            started_wall_ns: row.get(1).map_err(db_err)?,
+            stopped_wall_ns: row.get(2).map_err(db_err)?,
+            version: row.get(3).map_err(db_err)?,
+            simulated: row.get(4).map_err(db_err)?,
+            note: row.get(5).map_err(db_err)?,
         });
     }
     Ok(runs)
@@ -1730,17 +1734,17 @@ pub fn collectors(conn: &Connection) -> Result<Vec<CollectorStatus>> {
                     queue_high_water, coverage_json
                FROM collector_health ORDER BY collector_id",
         )
-        .map_err(sql)?;
-    let mut rows = statement.query([]).map_err(sql)?;
+        .map_err(db_err)?;
+    let mut rows = statement.query([]).map_err(db_err)?;
     let mut collectors = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
-        let configured: String = row.get(1).map_err(sql)?;
-        let availability: String = row.get(2).map_err(sql)?;
-        let permission: String = row.get(3).map_err(sql)?;
-        let coverage_json: Option<String> = row.get(13).map_err(sql)?;
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let configured: String = row.get(1).map_err(db_err)?;
+        let availability: String = row.get(2).map_err(db_err)?;
+        let permission: String = row.get(3).map_err(db_err)?;
+        let coverage_json: Option<String> = row.get(13).map_err(db_err)?;
         collectors.push(CollectorStatus {
             health: CollectorHealth {
-                collector_id: row.get(0).map_err(sql)?,
+                collector_id: row.get(0).map_err(db_err)?,
                 configured: match configured.as_str() {
                     "enabled" => ConfiguredState::Enabled,
                     "disabled" => ConfiguredState::Disabled,
@@ -1753,15 +1757,15 @@ pub fn collectors(conn: &Connection) -> Result<Vec<CollectorStatus>> {
                     "partial" => PermissionState::Partial,
                     _ => PermissionState::Unknown,
                 },
-                last_success_wall_ns: row.get(4).map_err(sql)?,
-                last_error_wall_ns: row.get(5).map_err(sql)?,
-                last_error: row.get(6).map_err(sql)?,
-                error_count: row.get::<_, i64>(7).map_err(sql)?.max(0) as u64,
-                received_count: row.get::<_, i64>(8).map_err(sql)?.max(0) as u64,
-                persisted_count: row.get::<_, i64>(9).map_err(sql)?.max(0) as u64,
-                dropped_count: row.get::<_, i64>(10).map_err(sql)?.max(0) as u64,
-                truncated_count: row.get::<_, i64>(11).map_err(sql)?.max(0) as u64,
-                queue_high_water: row.get::<_, i64>(12).map_err(sql)?.max(0) as u64,
+                last_success_wall_ns: row.get(4).map_err(db_err)?,
+                last_error_wall_ns: row.get(5).map_err(db_err)?,
+                last_error: row.get(6).map_err(db_err)?,
+                error_count: row.get::<_, i64>(7).map_err(db_err)?.max(0) as u64,
+                received_count: row.get::<_, i64>(8).map_err(db_err)?.max(0) as u64,
+                persisted_count: row.get::<_, i64>(9).map_err(db_err)?.max(0) as u64,
+                dropped_count: row.get::<_, i64>(10).map_err(db_err)?.max(0) as u64,
+                truncated_count: row.get::<_, i64>(11).map_err(db_err)?.max(0) as u64,
+                queue_high_water: row.get::<_, i64>(12).map_err(db_err)?.max(0) as u64,
                 coverage: serde_json::Value::Null,
             },
             coverage: coverage_json
@@ -1780,22 +1784,22 @@ pub fn integrations(conn: &Connection) -> Result<Vec<IntegrationStatus>> {
                     capabilities_json, last_seen_wall_ns, last_error
                FROM integration_state ORDER BY integration_id",
         )
-        .map_err(sql)?;
-    let mut rows = statement.query([]).map_err(sql)?;
+        .map_err(db_err)?;
+    let mut rows = statement.query([]).map_err(db_err)?;
     let mut integrations = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
-        let capabilities_json: Option<String> = row.get(4).map_err(sql)?;
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let capabilities_json: Option<String> = row.get(4).map_err(db_err)?;
         let capabilities: Vec<String> = capabilities_json
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         integrations.push(IntegrationStatus {
-            integration_id: row.get(0).map_err(sql)?,
-            configured_state: row.get(1).map_err(sql)?,
-            detected_state: row.get(2).map_err(sql)?,
-            version: row.get(3).map_err(sql)?,
+            integration_id: row.get(0).map_err(db_err)?,
+            configured_state: row.get(1).map_err(db_err)?,
+            detected_state: row.get(2).map_err(db_err)?,
+            version: row.get(3).map_err(db_err)?,
             capabilities,
-            last_seen_wall_ns: row.get(5).map_err(sql)?,
-            last_error: row.get(6).map_err(sql)?,
+            last_seen_wall_ns: row.get(5).map_err(db_err)?,
+            last_error: row.get(6).map_err(db_err)?,
         });
     }
     Ok(integrations)
@@ -1809,18 +1813,18 @@ pub fn gaps(conn: &Connection) -> Result<Vec<GapRow>> {
                FROM coverage_gaps
               ORDER BY resolved_wall_ns IS NOT NULL, since_wall_ns DESC",
         )
-        .map_err(sql)?;
-    let mut rows = statement.query([]).map_err(sql)?;
+        .map_err(db_err)?;
+    let mut rows = statement.query([]).map_err(db_err)?;
     let mut gaps = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
+    while let Some(row) = rows.next().map_err(db_err)? {
         gaps.push(GapRow {
             gap: CoverageGap {
-                source_id: row.get(0).map_err(sql)?,
-                kind: row.get(1).map_err(sql)?,
-                detail: row.get(2).map_err(sql)?,
-                since_wall_ns: row.get(3).map_err(sql)?,
+                source_id: row.get(0).map_err(db_err)?,
+                kind: row.get(1).map_err(db_err)?,
+                detail: row.get(2).map_err(db_err)?,
+                since_wall_ns: row.get(3).map_err(db_err)?,
             },
-            resolved_wall_ns: row.get(4).map_err(sql)?,
+            resolved_wall_ns: row.get(4).map_err(db_err)?,
         });
     }
     Ok(gaps)
@@ -1830,15 +1834,15 @@ pub fn gaps(conn: &Connection) -> Result<Vec<GapRow>> {
 pub fn log_sources(conn: &Connection) -> Result<Vec<LogSourceStatus>> {
     let mut statement = conn
         .prepare("SELECT source_id, kind, target, entity_hint FROM log_sources ORDER BY source_id")
-        .map_err(sql)?;
-    let mut rows = statement.query([]).map_err(sql)?;
+        .map_err(db_err)?;
+    let mut rows = statement.query([]).map_err(db_err)?;
     let mut sources = Vec::new();
-    while let Some(row) = rows.next().map_err(sql)? {
+    while let Some(row) = rows.next().map_err(db_err)? {
         sources.push(LogSourceStatus {
-            source_id: row.get(0).map_err(sql)?,
-            kind: row.get(1).map_err(sql)?,
-            target: row.get(2).map_err(sql)?,
-            entity_hint: row.get(3).map_err(sql)?,
+            source_id: row.get(0).map_err(db_err)?,
+            kind: row.get(1).map_err(db_err)?,
+            target: row.get(2).map_err(db_err)?,
+            entity_hint: row.get(3).map_err(db_err)?,
         });
     }
     Ok(sources)
@@ -1855,7 +1859,7 @@ pub fn meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
         row.get(0)
     })
     .optional()
-    .map_err(sql)
+    .map_err(db_err)
 }
 
 /// Preferred window when the user did not specify one: the last hour of data.
@@ -1868,9 +1872,9 @@ pub fn default_window(conn: &Connection) -> Result<Window> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CpuTimes, HostSample, LogRecord, MemSnapshot, Stamps};
+    use crate::model::{CpuTimes, HostSample, LogRecord, MemSnapshot};
     use crate::store::{Store, WriteItem, WriteRecord};
-    use crate::time::ClockDomain;
+    use crate::time::{ClockDomain, Stamps};
 
     fn stamps(wall: i64, mono: i64) -> Stamps {
         Stamps::new(wall, mono, "boot-1", ClockDomain::Simulated)
