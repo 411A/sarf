@@ -1,0 +1,9 @@
+# cloudflared tunnel integration descriptor.
+id = "cloudflared"
+name = "Cloudflare Tunnel (cloudflared)"
+category = "tunnel"
+executables = ["cloudflared"]
+comm = ["cloudflared"]
+description = "Recognizes cloudflared tunnel processes and ingests explicitly configured cloudflared logs. Tunnel-internal metrics require an operator-supplied stats endpoint and are not read by default."
+default_enabled = true
+capabilities = ["process_enrichment", "log_source"]

@@ -1,0 +1,17 @@
+# nginx integration descriptor (universal process accounting is independent of it).
+id = "nginx"
+name = "nginx"
+category = "web_server"
+executables = ["nginx"]
+comm = ["nginx"]
+description = "Recognizes nginx master/worker processes, maps them to their cgroup, and ingests explicitly configured access/error logs."
+default_enabled = true
+capabilities = ["process_enrichment", "log_source"]
+
+[[roles]]
+label = "nginx master"
+comm_contains = ["nginx: master"]
+
+[[roles]]
+label = "nginx worker"
+comm_contains = ["nginx: worker"]

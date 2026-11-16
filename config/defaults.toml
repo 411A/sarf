@@ -1,0 +1,128 @@
+# SARF default configuration.
+#
+# This file is written by `sarf init` and is safe to edit. Every value below is a
+# documented starting point, not a universal guarantee. See `guide-ChatGPT.md`.
+#
+# Data location: by default SARF stores everything in `sarf-data/` next to the
+# executable (or `--data-dir` / `SARF_DATA_DIR`). This file lives there too.
+
+[general]
+# Normal sampling cadence for host and cgroup counters.
+interval_secs = 5
+# Cadence for the selected/top-N process samples.
+process_interval_secs = 5
+# Cadence for optional integration discovery (docker, tmux, zellij, sessions).
+discovery_secs = 30
+# Hard database budget. Retention prunes low-priority data before this is reached.
+max_db_mb = 100
+# WAL budget; the writer checkpoints when the WAL grows past this.
+max_wal_mb = 16
+# How often retention and the disk guard run.
+prune_interval_secs = 300
+
+[process]
+enabled = true
+# Privacy: argv is never persisted unless this is explicitly enabled.
+store_arguments = false
+# Persist every process's time series. Off by default: only top-N and pinned.
+sample_all_processes = false
+# How many top processes (by observed CPU) keep their raw time series.
+top_n_persistence = 20
+# Refuse to grow beyond this many tracked processes (protects against PID storms).
+max_processes = 20000
+
+[cgroup]
+enabled = true
+sample_secs = 5
+# Bounded number of cgroups sampled per cycle (top by CPU/memory).
+max_cgroups = 512
+
+[network]
+interface_counters = true
+# Per-container network counters from runtime metadata (when available).
+container_counters = true
+
+[logs]
+enabled = true
+# Bounded per-source ring buffer (guide §9.1).
+ring_lines = 1000
+ring_minutes = 10
+ring_bytes_per_source = 524288
+max_line_bytes = 4096
+# Sources are explicit; SARF never scrapes the filesystem for *.log files.
+max_sources = 32
+# Bytes read from a source per collection cycle.
+read_bytes_per_cycle = 65536
+persist_info_sample_percent = 0
+persist_warnings = true
+persist_errors = true
+always_store_patterns = [
+  "WARN", "ERROR", "FATAL", "PANIC", "Traceback",
+  "ENOSPC", "OOM", "Timeout", "ConnectionRefused", "unhealthy",
+]
+
+[adaptive]
+enabled = true
+# Incident mode cadence for affected entities only.
+incident_interval_ms = 500
+max_incident_secs = 120
+max_entities_high_resolution = 8
+recovery_hysteresis_secs = 30
+
+[thresholds]
+host_cpu_pct = 10.0
+service_cpu_pct = 20.0
+memory_pct = 80.0
+psi_some_pct = 10.0
+error_rate_per_min = 5
+
+[retention]
+raw_hours = 48
+process_raw_hours = 24
+rollup_1m_days = 14
+rollup_1h_days = 90
+incident_days = 180
+log_days = 7
+
+[integrations]
+docker = "auto"
+tmux = "auto"
+zellij = "auto"
+systemd = "auto"
+nginx = "auto"
+cloudflared = "auto"
+
+[report]
+# Attribution window size for `sarf why` and the HTML "what happened" view.
+bucket_secs = 60
+max_points = 600
+max_processes = 200
+max_logs = 500
+max_windows = 12
+max_process_tree_nodes = 400
+title = "SARF activity report"
+
+# Explicit log sources. Examples (uncomment and adjust):
+#
+# [[logs.sources]]
+# id = "nginx-error"
+# kind = "file"
+# path = "/var/log/nginx/error.log"
+# entity_hint = "nginx"
+#
+# [[logs.sources]]
+# id = "nginx-access"
+# kind = "file"
+# path = "/var/log/nginx/access.log"
+# entity_hint = "nginx"
+#
+# [[logs.sources]]
+# id = "cloudflared"
+# kind = "file"
+# path = "/var/log/cloudflared/cloudflared.log"
+# entity_hint = "cloudflared"
+#
+# [[logs.sources]]
+# id = "docker-web"
+# kind = "docker"
+# container = "web-1"

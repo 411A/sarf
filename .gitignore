@@ -1,0 +1,10 @@
+/target
+/_scratch
+**/*.rs.bk
+*.pdb
+*.db
+*.db-wal
+*.db-shm
+/sarf-data
+/dist
+/bench-out

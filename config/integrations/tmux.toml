@@ -1,0 +1,18 @@
+# tmux integration descriptor.
+id = "tmux"
+name = "tmux"
+category = "session_manager"
+executables = ["tmux"]
+comm = ["tmux"]
+description = "Maps processes to tmux sessions/windows/panes using bounded list-panes format queries. Sessions are read-only; SARF never attaches to or modifies a session."
+default_enabled = true
+capabilities = ["session_topology", "process_enrichment"]
+
+[[roles]]
+label = "tmux server"
+comm_contains = ["tmux: server"]
+
+[[roles]]
+label = "tmux client"
+comm_contains = ["tmux"]
+argv_contains = ["attach", "new-session", "new"]

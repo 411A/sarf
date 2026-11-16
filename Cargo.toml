@@ -1,0 +1,54 @@
+[package]
+name = "sarf"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "SARF — lightweight Linux process, service and activity forensics"
+license = "MIT"
+repository = "https://example.invalid/sarf"
+readme = "README.md"
+keywords = ["linux", "monitoring", "forensics", "procfs", "cgroups"]
+categories = ["command-line-utilities", "os::linux-apis"]
+default-run = "sarf"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+clap = { version = "4.6.6", features = ["derive"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+toml = "1.1.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "warn"
+non_ascii_idents = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+# Pragmatic, low-noise correctness lints.
+unwrap_used = "warn"
+expect_used = "warn"
+manual_let_else = "warn"
+redundant_clone = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.perf]
+inherits = "release"
+debug = false

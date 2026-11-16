@@ -1,0 +1,17 @@
+# systemd mapping descriptor (no D-Bus dependency in v0.1; unit is inferred from cgroup).
+id = "systemd"
+name = "systemd"
+category = "service_manager"
+executables = ["systemd", "systemctl"]
+comm = ["systemd"]
+description = "Maps process cgroups to systemd units and records unit identity. D-Bus unit state and job events are a planned upgrade."
+default_enabled = true
+capabilities = ["process_enrichment", "service_manager_events"]
+
+[[roles]]
+label = "systemd (PID 1)"
+comm_contains = ["systemd"]
+
+[[roles]]
+label = "systemctl"
+comm_contains = ["systemctl"]

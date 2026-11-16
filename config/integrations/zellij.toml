@@ -1,0 +1,13 @@
+# Zellij integration descriptor.
+id = "zellij"
+name = "Zellij"
+category = "session_manager"
+executables = ["zellij"]
+comm = ["zellij"]
+description = "Recognizes Zellij sessions and the processes started inside them. Pane-level topology needs a user-installed plugin and is intentionally not required."
+default_enabled = true
+capabilities = ["session_topology", "process_enrichment"]
+
+[[roles]]
+label = "zellij session"
+comm_contains = ["zellij"]
