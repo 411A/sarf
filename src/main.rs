@@ -1,13 +1,13 @@
 //! SARF command-line entry point.
 
-fn main() -> std::process::ExitCode {
-    // The real CLI is installed by `src/cli.rs`; until then, keep the binary
-    // honest about its state rather than pretending to work.
-    println!(
-        "{} {} — {} (foundation build)",
-        sarf::PRODUCT,
-        sarf::VERSION,
-        sarf::PRODUCT_LONG
-    );
-    std::process::ExitCode::SUCCESS
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    match sarf::commands::main() {
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Err(err) => {
+            eprintln!("sarf: {err}");
+            ExitCode::from(1)
+        }
+    }
 }

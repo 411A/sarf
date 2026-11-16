@@ -68,7 +68,7 @@ impl Window {
 }
 
 /// Aggregated resource usage for one entity inside a window.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct EntityUsage {
     /// Entity id.
     pub entity_id: String,
@@ -287,7 +287,7 @@ pub struct EventFilter {
 }
 
 /// One process lifetime summary row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LifetimeSummary {
     /// Process entity id.
     pub process_instance_id: String,
@@ -320,7 +320,7 @@ pub struct LifetimeSummary {
 }
 
 /// One daemon run summary.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RunSummary {
     /// Run id.
     pub run_id: i64,
@@ -337,7 +337,7 @@ pub struct RunSummary {
 }
 
 /// Collector health and coverage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct CollectorStatus {
     /// Parsed health record.
     pub health: CollectorHealth,
@@ -346,7 +346,7 @@ pub struct CollectorStatus {
 }
 
 /// Integration status row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct IntegrationStatus {
     /// Integration id.
     pub integration_id: String,
@@ -365,7 +365,7 @@ pub struct IntegrationStatus {
 }
 
 /// Coverage gap row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GapRow {
     /// Gap description.
     pub gap: CoverageGap,
@@ -374,7 +374,7 @@ pub struct GapRow {
 }
 
 /// Configured log source row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LogSourceStatus {
     /// Source id.
     pub source_id: String,
@@ -384,6 +384,54 @@ pub struct LogSourceStatus {
     pub target: String,
     /// Entity hint.
     pub entity_hint: Option<String>,
+}
+
+/// Row counts for one report window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowCounts {
+    /// Log records in the window.
+    pub logs: u64,
+    /// Events in the window.
+    pub events: u64,
+    /// Process lifetimes overlapping the window.
+    pub processes: u64,
+    /// Incidents overlapping the window.
+    pub incidents: u64,
+}
+
+/// Count the bounded window rows used by reports without loading them.
+pub fn window_counts(conn: &Connection, window: Window) -> Result<WindowCounts> {
+    let count = |sql: &str| -> Result<u64> {
+        let value: i64 = conn
+            .query_row(sql, params![window.since, window.until], |row| row.get(0))
+            .map_err(db_err)?;
+        Ok(value.max(0) as u64)
+    };
+    Ok(WindowCounts {
+        logs: count("SELECT COUNT(*) FROM logs WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2")?,
+        events: count("SELECT COUNT(*) FROM events WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2")?,
+        processes: count(
+            "SELECT COUNT(*) FROM process_lifetimes
+              WHERE start_wall_ns < ?2 AND (end_wall_ns IS NULL OR end_wall_ns >= ?1)",
+        )?,
+        incidents: count(
+            "SELECT COUNT(*) FROM incidents
+              WHERE started_wall_ns < ?2 AND (ended_wall_ns IS NULL OR ended_wall_ns >= ?1)",
+        )?,
+    })
+}
+
+/// Maximum installed memory reported by host samples in a window.
+pub fn host_mem_total(conn: &Connection, window: Window) -> Result<Option<u64>> {
+    let value: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(mem_total_bytes) FROM host_samples
+              WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2 AND mem_total_bytes IS NOT NULL",
+            params![window.since, window.until],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
+    Ok(value.map(|value| value.max(0) as u64))
 }
 
 /// Database summary for `sarf status`.
@@ -448,7 +496,9 @@ pub fn db_stats(conn: &Connection) -> Result<DbStats> {
         "coverage_gaps",
     ] {
         let count: i64 = conn
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
             .map_err(db_err)?;
         stats.counts.insert(table.to_string(), count);
     }
@@ -477,9 +527,11 @@ pub fn db_stats(conn: &Connection) -> Result<DbStats> {
         )
         .map_err(db_err)?;
     stats.max_incident_id = conn
-        .query_row("SELECT COALESCE(MAX(incident_id), 0) FROM incidents", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COALESCE(MAX(incident_id), 0) FROM incidents",
+            [],
+            |row| row.get(0),
+        )
         .map_err(db_err)?;
     if let Some((hostname, boot, kernel, arch)) = conn
         .query_row(
@@ -541,6 +593,12 @@ pub fn host_series(conn: &Connection, window: Window) -> Result<Vec<HostSeriesPo
         .map_err(db_err)?;
     let mut points = Vec::new();
     let mut previous: Option<Raw> = None;
+    let cpu_count = meta_value(conn, "cpu_count")
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1)
+        .max(1) as f64;
     while let Some(row) = rows.next().map_err(db_err)? {
         let user = row.u64_at(1)?;
         let nice = row.u64_at(2)?;
@@ -580,14 +638,14 @@ pub fn host_series(conn: &Connection, window: Window) -> Result<Vec<HostSeriesPo
         let delta_total = current.total.saturating_sub(previous.total);
         let delta_busy = current.busy.saturating_sub(previous.busy);
         let cpu_pct = if delta_total > 0 {
-            Some(delta_busy as f64 * 100.0 / delta_total as f64)
+            // /proc/stat aggregates all logical CPUs. Convert to the documented
+            // "percent of one core" unit by multiplying by the CPU count.
+            Some(delta_busy as f64 * 100.0 * cpu_count / delta_total as f64)
         } else {
             None
         };
         let mem_used = match (current.mem_total, current.mem_available) {
-            (Some(total), Some(available)) if total > 0 => {
-                Some(total.saturating_sub(available))
-            }
+            (Some(total), Some(available)) if total > 0 => Some(total.saturating_sub(available)),
             _ => None,
         };
         let rate = |now: Option<u64>, before: Option<u64>| -> Option<f64> {
@@ -637,8 +695,14 @@ pub fn host_usage(conn: &Connection, window: Window) -> Result<Option<EntityUsag
     } else {
         Some(mem_values.iter().sum::<u64>() / mem_values.len() as u64)
     };
-    let first_wall = points.first().map(|point| point.wall_ns).unwrap_or(window.since);
-    let last_wall = points.last().map(|point| point.wall_ns).unwrap_or(window.until);
+    let first_wall = points
+        .first()
+        .map(|point| point.wall_ns)
+        .unwrap_or(window.since);
+    let last_wall = points
+        .last()
+        .map(|point| point.wall_ns)
+        .unwrap_or(window.until);
     let covered_ns = last_wall.saturating_sub(first_wall).max(0);
     let net_rx: u64 = points
         .iter()
@@ -668,9 +732,8 @@ pub fn host_usage(conn: &Connection, window: Window) -> Result<Option<EntityUsag
         container: None,
         cpu_avg_pct: cpu_avg,
         cpu_max_pct: cpu_max,
-        cpu_total_usec: cpu_avg.map(|pct| {
-            (pct / 100.0 * covered_ns as f64 / 1_000.0).max(0.0) as u64
-        }),
+        cpu_total_usec: cpu_avg
+            .map(|pct| (pct / 100.0 * covered_ns as f64 / 1_000.0).max(0.0) as u64),
         memory_avg_bytes: memory_avg,
         memory_max_bytes: mem_values.iter().max().copied(),
         io_read_bytes: None,
@@ -722,7 +785,11 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
         while let Some(row) = rows.next().map_err(db_err)? {
             let entity_id: String = row.get(0).map_err(db_err)?;
             let bucket: i64 = row.get(1).map_err(db_err)?;
-            let samples = row.get::<_, Option<i64>>(2).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+            let samples = row
+                .get::<_, Option<i64>>(2)
+                .map_err(db_err)?
+                .unwrap_or(0)
+                .max(0) as u64;
             let cpu_avg: Option<f64> = row.get(3).map_err(db_err)?;
             let cpu_max: Option<f64> = row.get(4).map_err(db_err)?;
             let cpu_total: Option<i64> = row.get(5).map_err(db_err)?;
@@ -749,11 +816,7 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
                 slot.cpu_max = Some(slot.cpu_max.map_or(max, |current| current.max(max)));
             }
             if let Some(value) = mem_max {
-                slot.memory_max = Some(
-                    slot.memory_max
-                        .unwrap_or(0)
-                        .max(value.max(0) as u64),
-                );
+                slot.memory_max = Some(slot.memory_max.unwrap_or(0).max(value.max(0) as u64));
             }
             if let Some(value) = mem_avg {
                 slot.memory_sum = slot
@@ -926,8 +989,16 @@ fn process_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> 
         while let Some(row) = rows.next().map_err(db_err)? {
             let entity_id: String = row.get(0).map_err(db_err)?;
             let wall: i64 = row.get(1).map_err(db_err)?;
-            let user: u64 = row.get::<_, Option<i64>>(2).map_err(db_err)?.unwrap_or(0).max(0) as u64;
-            let system: u64 = row.get::<_, Option<i64>>(3).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+            let user: u64 = row
+                .get::<_, Option<i64>>(2)
+                .map_err(db_err)?
+                .unwrap_or(0)
+                .max(0) as u64;
+            let system: u64 = row
+                .get::<_, Option<i64>>(3)
+                .map_err(db_err)?
+                .unwrap_or(0)
+                .max(0) as u64;
             let ticks = user.saturating_add(system);
             let rss: Option<i64> = row.get(4).map_err(db_err)?;
             let read: Option<i64> = row.get(5).map_err(db_err)?;
@@ -1063,8 +1134,16 @@ pub fn entity_series(
     let mut previous: Option<(i64, u64, Option<u64>, Option<u64>)> = None;
     while let Some(row) = rows.next().map_err(db_err)? {
         let wall: i64 = row.get(0).map_err(db_err)?;
-        let user: u64 = row.get::<_, Option<i64>>(1).map_err(db_err)?.unwrap_or(0).max(0) as u64;
-        let system: u64 = row.get::<_, Option<i64>>(2).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+        let user: u64 = row
+            .get::<_, Option<i64>>(1)
+            .map_err(db_err)?
+            .unwrap_or(0)
+            .max(0) as u64;
+        let system: u64 = row
+            .get::<_, Option<i64>>(2)
+            .map_err(db_err)?
+            .unwrap_or(0)
+            .max(0) as u64;
         let cpu = user.saturating_add(system);
         let rss: Option<i64> = row.get(3).map_err(db_err)?;
         let read: Option<i64> = row.get(4).map_err(db_err)?;
@@ -1078,9 +1157,7 @@ pub fn entity_series(
         if let Some((previous_wall, previous_cpu, previous_read, previous_write)) = previous {
             let elapsed_s = (wall - previous_wall) as f64 / 1e9;
             let cpu_pct = if elapsed_s > 0.0 {
-                Some(
-                    tick_seconds(cpu.saturating_sub(previous_cpu), hz) * 100.0 / elapsed_s,
-                )
+                Some(tick_seconds(cpu.saturating_sub(previous_cpu), hz) * 100.0 / elapsed_s)
             } else {
                 None
             };
@@ -1182,8 +1259,7 @@ pub fn buckets(
             host.psi_cpu_max = Some(host.psi_cpu_max.map_or(psi, |value| value.max(psi)));
         }
         if let Some(psi) = point.psi_memory {
-            host.psi_memory_max =
-                Some(host.psi_memory_max.map_or(psi, |value| value.max(psi)));
+            host.psi_memory_max = Some(host.psi_memory_max.map_or(psi, |value| value.max(psi)));
         }
         if let Some(psi) = point.psi_io {
             host.psi_io_max = Some(host.psi_io_max.map_or(psi, |value| value.max(psi)));
@@ -1268,12 +1344,28 @@ pub fn buckets(
         while let Some(row) = rows.next().map_err(db_err)? {
             let entity_id: String = row.get(0).map_err(db_err)?;
             let wall: i64 = row.get(1).map_err(db_err)?;
-            let user: u64 = row.get::<_, Option<i64>>(2).map_err(db_err)?.unwrap_or(0).max(0) as u64;
-            let system: u64 = row.get::<_, Option<i64>>(3).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+            let user: u64 = row
+                .get::<_, Option<i64>>(2)
+                .map_err(db_err)?
+                .unwrap_or(0)
+                .max(0) as u64;
+            let system: u64 = row
+                .get::<_, Option<i64>>(3)
+                .map_err(db_err)?
+                .unwrap_or(0)
+                .max(0) as u64;
             let ticks = user.saturating_add(system);
             let rss: Option<i64> = row.get(4).map_err(db_err)?;
-            let read: u64 = row.get::<_, Option<i64>>(5).map_err(db_err)?.unwrap_or(0).max(0) as u64;
-            let write: u64 = row.get::<_, Option<i64>>(6).map_err(db_err)?.unwrap_or(0).max(0) as u64;
+            let read: u64 = row
+                .get::<_, Option<i64>>(5)
+                .map_err(db_err)?
+                .unwrap_or(0)
+                .max(0) as u64;
+            let write: u64 = row
+                .get::<_, Option<i64>>(6)
+                .map_err(db_err)?
+                .unwrap_or(0)
+                .max(0) as u64;
             let start = bucket_start(wall);
             if let Some((previous_wall, previous_ticks, previous_read, previous_write)) =
                 previous.insert(entity_id.clone(), (wall, ticks, read, write))
@@ -1385,11 +1477,7 @@ pub fn buckets(
         bucket.entities.sort_by(|a, b| {
             b.cpu_usec
                 .cmp(&a.cpu_usec)
-                .then_with(|| {
-                    b.memory_max
-                        .unwrap_or(0)
-                        .cmp(&a.memory_max.unwrap_or(0))
-                })
+                .then_with(|| b.memory_max.unwrap_or(0).cmp(&a.memory_max.unwrap_or(0)))
         });
         bucket.entities.truncate(max_entities.max(1));
     }
@@ -1494,7 +1582,9 @@ pub fn all_incidents(conn: &Connection, limit: usize) -> Result<Vec<Incident>> {
                FROM incidents ORDER BY started_wall_ns DESC LIMIT ?1",
         )
         .map_err(db_err)?;
-    let mut rows = statement.query(params![limit.max(1) as i64]).map_err(db_err)?;
+    let mut rows = statement
+        .query(params![limit.max(1) as i64])
+        .map_err(db_err)?;
     let mut incidents = Vec::new();
     while let Some(row) = rows.next().map_err(db_err)? {
         incidents.push(incident_from_row(row)?);
@@ -1658,11 +1748,7 @@ pub fn events(conn: &Connection, filter: &EventFilter) -> Result<Vec<EventRecord
 }
 
 /// Process lifetimes overlapping a window, bounded.
-pub fn lifetimes(
-    conn: &Connection,
-    window: Window,
-    limit: usize,
-) -> Result<Vec<LifetimeSummary>> {
+pub fn lifetimes(conn: &Connection, window: Window, limit: usize) -> Result<Vec<LifetimeSummary>> {
     let mut statement = conn
         .prepare(
             "SELECT process_instance_id, host_pid, parent_process_instance_id, parent_host_pid,
@@ -1709,7 +1795,9 @@ pub fn runs(conn: &Connection, limit: usize) -> Result<Vec<RunSummary>> {
                FROM runs ORDER BY run_id DESC LIMIT ?1",
         )
         .map_err(db_err)?;
-    let mut rows = statement.query(params![limit.max(1) as i64]).map_err(db_err)?;
+    let mut rows = statement
+        .query(params![limit.max(1) as i64])
+        .map_err(db_err)?;
     let mut runs = Vec::new();
     while let Some(row) = rows.next().map_err(db_err)? {
         runs.push(RunSummary {
@@ -1855,9 +1943,11 @@ pub fn wall_rfc3339(wall_ns: i64) -> String {
 
 /// Read a metadata value.
 pub fn meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
-    conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |row| {
-        row.get(0)
-    })
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
     .optional()
     .map_err(db_err)
 }

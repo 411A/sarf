@@ -133,8 +133,7 @@ impl DataDir {
             std::fs::write(&tmp, crate::config::DEFAULT_CONFIG)
                 .map_err(|err| Error::io(&tmp, err))?;
             restrict_file_permissions(&tmp);
-            std::fs::rename(&tmp, &config_path)
-                .map_err(|err| Error::io(&config_path, err))?;
+            std::fs::rename(&tmp, &config_path).map_err(|err| Error::io(&config_path, err))?;
             Ok(true)
         } else {
             Ok(false)

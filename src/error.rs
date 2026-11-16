@@ -111,7 +111,11 @@ mod tests {
     fn parse_messages_are_bounded() {
         let err = Error::parse("proc/stat", "x".repeat(10_000));
         let text = err.to_string();
-        assert!(text.len() < 400, "message must stay bounded: {}", text.len());
+        assert!(
+            text.len() < 400,
+            "message must stay bounded: {}",
+            text.len()
+        );
     }
 
     #[test]

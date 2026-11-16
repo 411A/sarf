@@ -23,9 +23,7 @@ pub type WallNs = i64;
 pub type MonoNs = i64;
 
 /// A monotonic clock domain name as persisted in the database.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClockDomain {
     /// Linux `CLOCK_MONOTONIC`, boot-relative.
@@ -253,8 +251,10 @@ pub fn system_clock() -> SharedClock {
 
 /// Wall-clock timestamp to RFC 3339 in the machine's local time zone.
 pub fn format_wall_local(wall_ns: WallNs) -> String {
-    match chrono::DateTime::from_timestamp(wall_ns / 1_000_000_000, (wall_ns % 1_000_000_000) as u32)
-    {
+    match chrono::DateTime::from_timestamp(
+        wall_ns / 1_000_000_000,
+        (wall_ns % 1_000_000_000) as u32,
+    ) {
         Some(utc) => utc
             .with_timezone(&chrono::Local)
             .format("%Y-%m-%d %H:%M:%S%.3f %Z")
@@ -265,8 +265,10 @@ pub fn format_wall_local(wall_ns: WallNs) -> String {
 
 /// Wall-clock timestamp to a compact local `HH:MM:SS` label (report axes).
 pub fn format_wall_clock(wall_ns: WallNs) -> String {
-    match chrono::DateTime::from_timestamp(wall_ns / 1_000_000_000, (wall_ns % 1_000_000_000) as u32)
-    {
+    match chrono::DateTime::from_timestamp(
+        wall_ns / 1_000_000_000,
+        (wall_ns % 1_000_000_000) as u32,
+    ) {
         Some(utc) => utc
             .with_timezone(&chrono::Local)
             .format("%H:%M:%S")
@@ -277,8 +279,10 @@ pub fn format_wall_clock(wall_ns: WallNs) -> String {
 
 /// Wall-clock timestamp to RFC 3339 in UTC (stable across machines).
 pub fn format_wall_rfc3339(wall_ns: WallNs) -> String {
-    match chrono::DateTime::from_timestamp(wall_ns / 1_000_000_000, (wall_ns % 1_000_000_000) as u32)
-    {
+    match chrono::DateTime::from_timestamp(
+        wall_ns / 1_000_000_000,
+        (wall_ns % 1_000_000_000) as u32,
+    ) {
         Some(utc) => utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         None => "invalid".to_string(),
     }
@@ -341,6 +345,9 @@ mod tests {
         assert!(stamps.wall > 0 && stamps.mono > 0);
         assert_eq!(stamps.boot_id, "test-boot");
         assert_eq!(stamps.domain, ClockDomain::Simulated);
-        assert!(!stamps.is_boot_scoped(), "simulated clocks are not boot-relative");
+        assert!(
+            !stamps.is_boot_scoped(),
+            "simulated clocks are not boot-relative"
+        );
     }
 }

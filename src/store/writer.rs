@@ -429,7 +429,9 @@ mod tests {
         let (keep, dropped) = split_by_priority(items, WritePriority::Normal);
         assert_eq!(keep.len(), 2, "normal+critical kept");
         assert_eq!(dropped, 1, "low dropped");
-        assert!(keep.iter().all(|item| item.priority >= WritePriority::Normal));
+        assert!(keep
+            .iter()
+            .all(|item| item.priority >= WritePriority::Normal));
 
         let items = vec![
             WriteItem::normal(WriteRecord::Meta {

@@ -1,0 +1,29 @@
+# Build and runtime artifacts.
+target/
+sarf-data/
+_scratch/
+dist/
+bench-out/
+
+# Version control and CI metadata (the Docker build only needs source inputs).
+.git/
+.gitignore
+.github/
+.tmp-test/
+
+# Local databases and generated reports.
+*.db*
+*.sqlite
+*.sqlite3
+reports/
+**/reports/
+
+# Editor and OS noise.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

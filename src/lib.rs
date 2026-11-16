@@ -13,11 +13,30 @@
 
 #![deny(unsafe_code)]
 #![deny(missing_debug_implementations)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::float_cmp,
+        clippy::panic,
+        clippy::missing_panics_doc,
+        clippy::items_after_statements
+    )
+)]
 
+pub mod analysis;
+pub mod catalog;
+pub mod cli;
+pub mod collect;
+pub mod commands;
 pub mod config;
+pub mod daemon;
+pub mod enrich;
 pub mod error;
 pub mod model;
 pub mod paths;
+pub mod report;
 pub mod store;
 pub mod time;
 

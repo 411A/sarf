@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  linux:
+    name: Linux (glibc)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build all targets
+        run: cargo build --all-targets
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Policy tests
+        run: cargo test --test policy
+
+      - name: Plan conformance tests
+        run: cargo test --test plan_conformance
+
+      - name: Collector integration tests
+        run: cargo test --test integration_collectors
+
+      - name: Report integration tests
+        run: cargo test --test integration_report
+
+      - name: End-to-end tests
+        run: cargo test --test e2e
+
+      - name: Performance tests (release)
+        run: cargo test --release --test perf -- --nocapture
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarf-linux-x86_64
+          path: target/release/sarf
+          if-no-files-found: error
+
+      - name: Upload e2e reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarf-e2e-reports
+          path: sarf-data/reports/*.html
+          if-no-files-found: ignore
+
+  linux-musl:
+    name: Linux (musl)
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential musl-tools pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+
+      - name: Build release binary (musl)
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Upload musl binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarf-linux-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/sarf
+          if-no-files-found: error
+
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # e2e and perf are Linux-runtime tests; the linux job above owns them.
+      - name: Platform note
+        run: Write-Host "Skipping tests/e2e.rs and tests/perf.rs on Windows; covered by the linux job."
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Policy tests
+        run: cargo test --test policy
+
+      - name: Plan conformance tests
+        run: cargo test --test plan_conformance
+
+      - name: Collector integration tests
+        run: cargo test --test integration_collectors
+
+      - name: Report integration tests
+        run: cargo test --test integration_report

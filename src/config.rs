@@ -515,8 +515,8 @@ pub struct Config {
 impl Config {
     /// Parse and validate configuration text.
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Config =
-            toml::from_str(text).map_err(|err| Error::Config(format!("TOML parse error: {err}")))?;
+        let config: Config = toml::from_str(text)
+            .map_err(|err| Error::Config(format!("TOML parse error: {err}")))?;
         config.validate()?;
         Ok(config)
     }
@@ -581,7 +581,12 @@ impl Config {
             1.0,
             1_000_000.0,
         )?;
-        check_range("cgroup.sample_secs", self.cgroup.sample_secs as f64, 1.0, 3600.0)?;
+        check_range(
+            "cgroup.sample_secs",
+            self.cgroup.sample_secs as f64,
+            1.0,
+            3600.0,
+        )?;
         check_range(
             "cgroup.max_cgroups",
             self.cgroup.max_cgroups as f64,
@@ -597,7 +602,12 @@ impl Config {
             4096.0,
             268_435_456.0,
         )?;
-        check_range("logs.max_line_bytes", logs.max_line_bytes as f64, 128.0, 1_048_576.0)?;
+        check_range(
+            "logs.max_line_bytes",
+            logs.max_line_bytes as f64,
+            128.0,
+            1_048_576.0,
+        )?;
         if logs.max_line_bytes as u64 > logs.ring_bytes_per_source {
             return Err(Error::Config(
                 "logs.max_line_bytes must not exceed logs.ring_bytes_per_source".into(),
@@ -657,15 +667,30 @@ impl Config {
                 "adaptive.incident_interval_ms must be lower than general.interval_secs*1000 when adaptive is enabled".into(),
             ));
         }
-        check_range("thresholds.host_cpu_pct", self.thresholds.host_cpu_pct, 0.0, 100.0)?;
+        check_range(
+            "thresholds.host_cpu_pct",
+            self.thresholds.host_cpu_pct,
+            0.0,
+            100.0,
+        )?;
         check_range(
             "thresholds.service_cpu_pct",
             self.thresholds.service_cpu_pct,
             0.0,
             10_000.0,
         )?;
-        check_range("thresholds.memory_pct", self.thresholds.memory_pct, 1.0, 100.0)?;
-        check_range("thresholds.psi_some_pct", self.thresholds.psi_some_pct, 0.0, 100.0)?;
+        check_range(
+            "thresholds.memory_pct",
+            self.thresholds.memory_pct,
+            1.0,
+            100.0,
+        )?;
+        check_range(
+            "thresholds.psi_some_pct",
+            self.thresholds.psi_some_pct,
+            0.0,
+            100.0,
+        )?;
         check_range(
             "thresholds.error_rate_per_min",
             self.thresholds.error_rate_per_min,
@@ -673,7 +698,12 @@ impl Config {
             1_000_000.0,
         )?;
         let retention = &self.retention;
-        check_range("retention.raw_hours", retention.raw_hours as f64, 1.0, 8760.0)?;
+        check_range(
+            "retention.raw_hours",
+            retention.raw_hours as f64,
+            1.0,
+            8760.0,
+        )?;
         check_range(
             "retention.process_raw_hours",
             retention.process_raw_hours as f64,
@@ -703,11 +733,26 @@ impl Config {
             1.0,
             36_500.0,
         )?;
-        check_range("retention.log_days", retention.log_days as f64, 1.0, 36_500.0)?;
+        check_range(
+            "retention.log_days",
+            retention.log_days as f64,
+            1.0,
+            36_500.0,
+        )?;
         let report = &self.report;
-        check_range("report.bucket_secs", report.bucket_secs as f64, 5.0, 86_400.0)?;
+        check_range(
+            "report.bucket_secs",
+            report.bucket_secs as f64,
+            5.0,
+            86_400.0,
+        )?;
         check_range("report.max_points", report.max_points as f64, 10.0, 5000.0)?;
-        check_range("report.max_processes", report.max_processes as f64, 1.0, 10_000.0)?;
+        check_range(
+            "report.max_processes",
+            report.max_processes as f64,
+            1.0,
+            10_000.0,
+        )?;
         check_range("report.max_logs", report.max_logs as f64, 1.0, 100_000.0)?;
         check_range("report.max_windows", report.max_windows as f64, 1.0, 1000.0)?;
         check_range(
@@ -717,9 +762,7 @@ impl Config {
             100_000.0,
         )?;
         if report.title.trim().is_empty() || report.title.len() > 200 {
-            return Err(Error::Config(
-                "report.title must be 1..=200 bytes".into(),
-            ));
+            return Err(Error::Config("report.title must be 1..=200 bytes".into()));
         }
         // Log sources: unique ids, valid targets, consistent bounds.
         if logs.sources.len() > logs.max_sources {
@@ -785,7 +828,12 @@ impl Config {
                 check_range("log source max_lines", max_lines as f64, 1.0, 1_000_000.0)?;
             }
             if let Some(max_bytes) = source.max_bytes {
-                check_range("log source max_bytes", max_bytes as f64, 4096.0, 268_435_456.0)?;
+                check_range(
+                    "log source max_bytes",
+                    max_bytes as f64,
+                    4096.0,
+                    268_435_456.0,
+                )?;
             }
         }
         Ok(())
@@ -902,7 +950,10 @@ mod tests {
         config.save(&path).expect("save");
         let loaded = Config::load(&path).expect("load");
         assert_eq!(loaded, config);
-        assert!(!dir.path().join("sarf.toml.tmp").exists(), "temp file renamed");
+        assert!(
+            !dir.path().join("sarf.toml.tmp").exists(),
+            "temp file renamed"
+        );
     }
 
     #[test]

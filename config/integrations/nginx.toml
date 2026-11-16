@@ -10,7 +10,7 @@ capabilities = ["process_enrichment", "log_source"]
 
 [[roles]]
 label = "nginx master"
-comm_contains = ["nginx: master"]
+comm_equals = ["nginx"]
 
 [[roles]]
 label = "nginx worker"

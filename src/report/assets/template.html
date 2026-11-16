@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="color-scheme" content="dark light">
+<title>__SARF_TITLE__</title>
+<script>
+(function () {
+  try {
+    var stored = localStorage.getItem('sarf-report-theme');
+    if (stored === 'light' || stored === 'dark') {
+      document.documentElement.setAttribute('data-theme', stored);
+    }
+  } catch (error) { /* Storage can be unavailable for local files. */ }
+}());
+</script>
+<style>/*__SARF_STYLE__*/</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to report content</a>
+
+<header class="masthead">
+  <div class="shell masthead-top">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <circle cx="16" cy="16" r="9.5" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
+        <path d="M16 2.5v5M16 24.5v5M2.5 16h5M24.5 16h5" fill="none" stroke="currentColor" stroke-width="1.4"></path>
+        <circle cx="16" cy="16" r="2.4" fill="currentColor"></circle>
+      </svg>
+      <span class="brand-name">SARF</span>
+      <span class="brand-divider" aria-hidden="true"></span>
+      <span class="brand-product" id="brand-product">Forensic activity report</span>
+    </div>
+    <div class="masthead-actions">
+      <span class="sim-badge" id="simulated-badge" hidden>Simulated data</span>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme" aria-pressed="false">
+        <svg class="theme-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.2"></circle>
+          <path d="M8 2a6 6 0 0 0 0 12z" fill="currentColor"></path>
+        </svg>
+        <span id="theme-toggle-label">Light</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="shell masthead-main">
+    <div class="masthead-copy">
+      <p class="eyebrow">
+        <span class="signal-dot" aria-hidden="true"></span>
+        Service Activity Recorder &amp; Forensics
+        <span class="eyebrow-sep" aria-hidden="true">/</span>
+        <span id="meta-product-short">SARF</span>
+      </p>
+      <h1 class="masthead-title">__SARF_TITLE__</h1>
+      <p class="masthead-subtitle" id="masthead-subtitle">Observed process, service and resource activity.</p>
+      <div class="masthead-meta" id="masthead-meta"></div>
+    </div>
+    <aside class="masthead-stamp" aria-label="Report artifact details">
+      <div class="stamp-head">
+        <span>Local artifact</span>
+        <span class="stamp-live"><span aria-hidden="true"></span>Offline</span>
+      </div>
+      <div class="stamp-barcode" aria-hidden="true"></div>
+      <dl class="stamp-facts">
+        <div><dt>Product</dt><dd id="stamp-product">—</dd></div>
+        <div><dt>Version</dt><dd id="stamp-version">—</dd></div>
+        <div><dt>Generated</dt><dd id="stamp-generated">—</dd></div>
+      </dl>
+    </aside>
+  </div>
+
+  <div class="shell window-strip" id="window-strip" role="group" aria-label="Report window"></div>
+</header>
+
+<nav class="report-nav" aria-label="Report sections">
+  <div class="shell report-nav-inner">
+    <div class="tabs-scroll">
+      <div class="tabs" id="report-tabs" role="tablist" aria-label="Report views">
+        <button class="tab is-active" id="tab-summary" type="button" role="tab" aria-selected="true" aria-controls="panel-summary" tabindex="0" data-view="summary">
+          <span class="tab-index" aria-hidden="true">01</span>Summary
+        </button>
+        <button class="tab" id="tab-windows" type="button" role="tab" aria-selected="false" aria-controls="panel-windows" tabindex="-1" data-view="windows">
+          <span class="tab-index" aria-hidden="true">02</span>What happened<span class="tab-count" id="tab-count-windows"></span>
+        </button>
+        <button class="tab" id="tab-timeline" type="button" role="tab" aria-selected="false" aria-controls="panel-timeline" tabindex="-1" data-view="timeline">
+          <span class="tab-index" aria-hidden="true">03</span>Timeline
+        </button>
+        <button class="tab" id="tab-top" type="button" role="tab" aria-selected="false" aria-controls="panel-top" tabindex="-1" data-view="top">
+          <span class="tab-index" aria-hidden="true">04</span>Contributors
+        </button>
+        <button class="tab" id="tab-processes" type="button" role="tab" aria-selected="false" aria-controls="panel-processes" tabindex="-1" data-view="processes">
+          <span class="tab-index" aria-hidden="true">05</span>Processes
+        </button>
+        <button class="tab" id="tab-incidents" type="button" role="tab" aria-selected="false" aria-controls="panel-incidents" tabindex="-1" data-view="incidents">
+          <span class="tab-index" aria-hidden="true">06</span>Incidents<span class="tab-count" id="tab-count-incidents"></span>
+        </button>
+        <button class="tab" id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" tabindex="-1" data-view="logs">
+          <span class="tab-index" aria-hidden="true">07</span>Logs &amp; events
+        </button>
+        <button class="tab" id="tab-coverage" type="button" role="tab" aria-selected="false" aria-controls="panel-coverage" tabindex="-1" data-view="coverage">
+          <span class="tab-index" aria-hidden="true">08</span>Coverage &amp; gaps
+        </button>
+      </div>
+    </div>
+    <div class="nav-status">
+      <span class="status-chip tone-neutral" id="nav-coverage">Coverage —</span>
+    </div>
+  </div>
+</nav>
+
+<main class="shell report-main" id="main" tabindex="-1">
+  <div class="error-banner" id="global-error" role="alert" hidden>
+    <strong>Report data could not be loaded.</strong>
+    <p id="global-error-detail"></p>
+  </div>
+  <noscript>
+    <div class="error-banner">
+      <strong>JavaScript is required.</strong>
+      <p>This report renders its embedded observations locally in your browser. Enable JavaScript and reopen the file.</p>
+    </div>
+  </noscript>
+
+  <section class="panel" id="panel-summary" role="tabpanel" aria-labelledby="tab-summary" tabindex="0">
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">01 / Summary</p>
+        <h2>At a glance</h2>
+        <p class="section-lede" id="summary-lede">Observed host and workload activity for the report window.</p>
+      </div>
+      <div class="health-block" id="summary-health"></div>
+    </div>
+
+    <div class="kpi-grid" id="summary-kpis" role="group" aria-label="Headline measurements"></div>
+
+    <div class="summary-columns">
+      <section class="card" aria-labelledby="host-facts-title">
+        <div class="card-head">
+          <h3 id="host-facts-title">Host context</h3>
+          <span class="card-note">Identity of the observed system</span>
+        </div>
+        <dl class="fact-grid" id="host-facts"></dl>
+      </section>
+      <section class="card" aria-labelledby="coverage-health-title">
+        <div class="card-head">
+          <h3 id="coverage-health-title">Coverage health</h3>
+          <span class="card-note">What was observable</span>
+        </div>
+        <div id="coverage-health"></div>
+      </section>
+    </div>
+
+    <p class="units-note" id="units-note"></p>
+  </section>
+
+  <section class="panel" id="panel-windows" role="tabpanel" aria-labelledby="tab-windows" tabindex="0" hidden>
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">02 / What happened</p>
+        <h2>Attribution windows</h2>
+        <p class="section-lede">High and low usage periods, with ranked contributors and the observations correlated to each window.</p>
+      </div>
+      <div class="section-aside" id="windows-count"></div>
+    </div>
+    <div class="callout" id="windows-callout">
+      <span class="callout-mark" aria-hidden="true">i</span>
+      <p>Confidence describes <strong>association</strong>, not causation. It reflects temporal overlap and recorded contribution, not proof that an entity produced the condition.</p>
+    </div>
+    <div class="window-list" id="windows-list"></div>
+  </section>
+
+  <section class="panel" id="panel-timeline" role="tabpanel" aria-labelledby="tab-timeline" tabindex="0" hidden>
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">03 / Host timeline</p>
+        <h2>Instrument trace</h2>
+        <p class="section-lede">Synchronized host measurements across the report window. Hover or focus a chart, then use the arrow keys to inspect individual samples.</p>
+      </div>
+      <div class="section-aside" id="timeline-count"></div>
+    </div>
+    <div class="chart-notice" id="timeline-note"></div>
+    <div class="chart-grid" id="timeline-charts"></div>
+    <div class="timeline-footer">
+      <p>Missing samples are rendered as gaps and never as zero. CPU and PSI values are percentages of one logical core. Memory and rates use IEC bytes; rates are bytes per second. High/low attribution windows are shaded when present.</p>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-top" role="tabpanel" aria-labelledby="tab-top" tabindex="0" hidden>
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">04 / Top contributors</p>
+        <h2>Ranked entities</h2>
+        <p class="section-lede">Processes, services, containers and workloads ordered by observed resource use.</p>
+      </div>
+      <div class="section-aside" id="top-count"></div>
+    </div>
+    <div class="subtabs" id="top-tabs" role="tablist" aria-label="Ranking metric"></div>
+    <div id="top-panels"></div>
+    <p class="table-note">Share is computed across the listed entities for the active ranking, not against a host-wide budget. A dash means the value was not reported; it does not mean zero.</p>
+  </section>
+
+  <section class="panel" id="panel-processes" role="tabpanel" aria-labelledby="tab-processes" tabindex="0" hidden>
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">05 / Processes</p>
+        <h2>Process tree &amp; lifetimes</h2>
+        <p class="section-lede">Observed process lineage, tool and service context, and the first and last sightings inside the report window.</p>
+      </div>
+      <div class="section-aside" id="process-count"></div>
+    </div>
+    <div class="control-bar">
+      <label class="search-field" for="process-search">
+        <span class="field-label">Filter processes</span>
+        <input id="process-search" type="search" placeholder="Name, PID, tool, unit, container or session" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="control-actions">
+        <button class="button button-quiet" id="process-expand" type="button">Expand all</button>
+        <button class="button button-quiet" id="process-collapse" type="button">Collapse all</button>
+      </div>
+    </div>
+    <p class="render-note" id="process-note" role="status"></p>
+    <div class="process-view" id="process-view"></div>
+  </section>
+
+  <section class="panel" id="panel-incidents" role="tabpanel" aria-labelledby="tab-incidents" tabindex="0" hidden>
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">06 / Incidents</p>
+        <h2>Incident register</h2>
+        <p class="section-lede">Threshold and analysis incidents recorded during the report window. Open a row to isolate the logs correlated with it.</p>
+      </div>
+      <div class="section-aside" id="incidents-count"></div>
+    </div>
+    <div class="incidents-wrap" id="incidents-table-wrap"></div>
+  </section>
+
+  <section class="panel" id="panel-logs" role="tabpanel" aria-labelledby="tab-logs" tabindex="0" hidden>
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">07 / Logs &amp; events</p>
+        <h2>Recorded signals</h2>
+        <p class="section-lede">Stored log lines and lifecycle or system events. Filters run locally over the embedded sample only.</p>
+      </div>
+      <div class="section-aside" id="logs-count"></div>
+    </div>
+    <div class="filter-bar" id="log-filters">
+      <label class="field field-search" for="log-search">
+        <span class="field-label">Search messages</span>
+        <input id="log-search" type="search" placeholder="Text, source, entity or level" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field" for="log-level">
+        <span class="field-label">Level</span>
+        <select id="log-level"><option value="all">All levels</option></select>
+      </label>
+      <label class="field" for="log-source">
+        <span class="field-label">Source</span>
+        <select id="log-source"><option value="all">All sources</option></select>
+      </label>
+      <button class="button button-quiet" id="log-reset" type="button">Reset</button>
+    </div>
+    <div class="context-banner" id="log-context" hidden></div>
+    <p class="render-note" id="log-note" role="status"></p>
+    <div class="logs-wrap" id="log-table-wrap"></div>
+
+    <section class="events-block" aria-labelledby="events-title">
+      <div class="card-head">
+        <h3 id="events-title">Events</h3>
+        <span class="card-note">Lifecycle and system observations</span>
+      </div>
+      <p class="render-note" id="events-note"></p>
+      <div id="events-table-wrap"></div>
+    </section>
+  </section>
+
+  <section class="panel" id="panel-coverage" role="tabpanel" aria-labelledby="tab-coverage" tabindex="0" hidden>
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">08 / Coverage &amp; gaps</p>
+        <h2>Observability ledger</h2>
+        <p class="section-lede">Collector health, loss counters, integration detection and declared gaps. An unavailable value is unknown, not zero.</p>
+      </div>
+      <div class="section-aside" id="coverage-count"></div>
+    </div>
+    <div class="notice notice-strong">
+      <strong>Unavailable is not zero.</strong>
+      <p>A dash means SARF did not receive a value, lacked permission, or the source was absent. It does not mean the observed system had no activity.</p>
+    </div>
+
+    <section class="ledger-block" aria-labelledby="collectors-title">
+      <div class="card-head">
+        <h3 id="collectors-title">Collectors</h3>
+        <span class="card-note">Configured, permitted, received, persisted and lost</span>
+      </div>
+      <div id="collectors-wrap"></div>
+    </section>
+
+    <section class="ledger-block" aria-labelledby="gaps-title">
+      <div class="card-head">
+        <h3 id="gaps-title">Coverage gaps</h3>
+        <span class="card-note">Declared periods or sources with incomplete evidence</span>
+      </div>
+      <div id="gaps-wrap"></div>
+    </section>
+
+    <section class="ledger-block" aria-labelledby="integrations-title">
+      <div class="card-head">
+        <h3 id="integrations-title">Integrations</h3>
+        <span class="card-note">Optional enrichment sources; they never gate baseline accounting</span>
+      </div>
+      <div id="integrations-wrap"></div>
+    </section>
+  </section>
+
+  <p class="sr-only" id="chart-announcer" aria-live="polite"></p>
+</main>
+
+<footer class="report-footer">
+  <div class="shell footer-inner">
+    <p class="footer-disclaimer">Observations and temporal associations only; SARF does not claim causation. Unavailable data is shown as —, never zero.</p>
+    <p class="footer-meta" id="footer-meta"></p>
+  </div>
+</footer>
+
+<div class="chart-tooltip" id="chart-tooltip" hidden></div>
+
+<script id="sarf-data" type="application/json">__SARF_DATA__</script>
+<script>/*__SARF_SCRIPT__*/</script>
+</body>
+</html>

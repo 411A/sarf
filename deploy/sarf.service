@@ -1,0 +1,68 @@
+[Unit]
+Description=SARF service activity recorder
+Documentation=https://example.invalid/sarf
+After=local-fs.target
+# Deliberately no Wants=/After=network-online.target: SARF records local
+# activity and never contacts the network, so it must also start on isolated or
+# air-gapped hosts.
+#
+# Docker is optional. This unit has no Requires=/After= on docker.service or
+# docker.socket and does not add the sarf user to the docker group. Baseline
+# process accounting works without Docker access; Docker enrichment degrades to
+# "unavailable" (never zero activity) unless the operator explicitly grants the
+# sarf user access to the Docker socket.
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sarf run --data-dir /var/lib/sarf --config /var/lib/sarf/sarf.toml
+
+# Unprivileged by design. If hidepid, Yama or log permissions hide data, SARF
+# records a coverage gap / unavailable status; it never substitutes zero.
+User=sarf
+Group=sarf
+WorkingDirectory=/var/lib/sarf
+Restart=on-failure
+RestartSec=5
+
+# Give the single SQLite writer time to commit/flush its WAL on shutdown.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Scheduling and resource limits.
+#
+# Nice=19 and IOSchedulingClass=idle put SARF at the lowest ordinary scheduling
+# priority, so it yields to interactive and service workloads.
+#
+# CPUWeight and IOWeight are cgroup v2 *relative* weights, not caps or
+# reservations. The default weight is 100; 1 means SARF gets almost no CPU or
+# I/O bandwidth only when something else is contending. On an idle host it can
+# still use the available CPU and I/O.
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+CPUWeight=1
+IOWeight=1
+
+# MemoryMax is a safety ceiling against runaway growth, not the expected RSS.
+# Normal operation is far below 64M; exceeding it is a bug and should be
+# reported with `sarf doctor`, `sarf status` and the service journal.
+MemoryMax=64M
+TasksMax=8
+
+# Hardening. ProtectSystem=strict makes the whole filesystem read-only; the
+# ReadWritePaths entry below grants the data directory (which is also
+# WorkingDirectory) as the only writable location SARF needs.
+# ProtectHome=read-only keeps user home directories readable for log/metadata
+# enrichment but not writable. The Docker socket is not used by default and is
+# not added to ReadWritePaths.
+NoNewPrivileges=yes
+UMask=0077
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/sarf
+
+[Install]
+WantedBy=multi-user.target

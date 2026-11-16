@@ -686,6 +686,9 @@ pub struct ToolRole {
     /// Match on process name/comm/exe basename (case-insensitive substring or equality).
     #[serde(default)]
     pub comm_contains: Vec<String>,
+    /// Exact `comm` equality (case-insensitive), checked before substring rules.
+    #[serde(default)]
+    pub comm_equals: Vec<String>,
     /// Match on arguments of the process (when argv is available).
     #[serde(default)]
     pub argv_contains: Vec<String>,
@@ -762,11 +765,13 @@ impl Severity {
     /// Parse a database or log-level string, case-insensitively.
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_uppercase().as_str() {
-            "DEBUG" | "TRACE" => Some(Severity::Debug),
-            "INFO" | "NOTICE" => Some(Severity::Info),
-            "WARN" | "WARNING" => Some(Severity::Warn),
+            "DEBUG" | "TRACE" | "DBG" => Some(Severity::Debug),
+            "INFO" | "NOTICE" | "INF" => Some(Severity::Info),
+            "WARN" | "WARNING" | "WRN" => Some(Severity::Warn),
             "ERROR" | "ERR" => Some(Severity::Error),
-            "FATAL" | "CRIT" | "CRITICAL" | "PANIC" | "ALERT" | "EMERG" => Some(Severity::Critical),
+            "FATAL" | "CRIT" | "CRITICAL" | "PANIC" | "ALERT" | "EMERG" | "FTL" => {
+                Some(Severity::Critical)
+            }
             _ => None,
         }
     }
@@ -1012,6 +1017,8 @@ pub struct Contribution {
     pub kind: EntityKind,
     /// Recognized tool, when any.
     pub tool: Option<String>,
+    /// Container id/name, when the entity is container-scoped.
+    pub container: Option<String>,
     /// Metric value observed for this entity in the window.
     pub value: f64,
     /// Percentage of the window total attributable to this entity, when meaningful.

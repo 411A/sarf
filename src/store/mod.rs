@@ -16,7 +16,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::error::{Error, Result};
 use crate::model::{
-    CollectorHealth, CoverageGap, CgroupSample, Entity, EventRecord, HostSample, Incident,
+    CgroupSample, CollectorHealth, CoverageGap, Entity, EventRecord, HostSample, Incident,
     LogRecord, ProcessSample, Relationship, WritePriority,
 };
 
@@ -281,10 +281,9 @@ impl Store {
             }
         }
         let existed = path.is_file();
-        let conn = Connection::open(path).map_err(|err| Error::Storage(format!(
-            "cannot open database {}: {err}",
-            path.display()
-        )))?;
+        let conn = Connection::open(path).map_err(|err| {
+            Error::Storage(format!("cannot open database {}: {err}", path.display()))
+        })?;
         let mut store = Store {
             conn,
             path: path.to_path_buf(),
@@ -297,8 +296,8 @@ impl Store {
 
     /// Open a private in-memory database (tests, `sarf benchmark --dry-run`).
     pub fn open_in_memory() -> Result<Self> {
-        let conn =
-            Connection::open_in_memory().map_err(|err| Error::Storage(format!("in-memory db: {err}")))?;
+        let conn = Connection::open_in_memory()
+            .map_err(|err| Error::Storage(format!("in-memory db: {err}")))?;
         let mut store = Store {
             conn,
             path: PathBuf::from(":memory:"),
@@ -388,8 +387,11 @@ impl Store {
                 .map_err(|err| Error::Storage(format!("begin migration: {err}")))?;
             tx.execute_batch(schema::MIGRATION_1)
                 .map_err(|err| Error::Storage(format!("apply schema v1: {err}")))?;
-            tx.execute_batch(&format!("PRAGMA user_version = {};", schema::SCHEMA_VERSION))
-                .map_err(|err| Error::Storage(format!("set user_version: {err}")))?;
+            tx.execute_batch(&format!(
+                "PRAGMA user_version = {};",
+                schema::SCHEMA_VERSION
+            ))
+            .map_err(|err| Error::Storage(format!("set user_version: {err}")))?;
             tx.commit()
                 .map_err(|err| Error::Storage(format!("commit migration: {err}")))?;
         }
@@ -551,7 +553,12 @@ impl Store {
                       WHERE process_instance_id = ?1",
                 )
                 .map_err(map)?
-                .execute(params![process_instance_id, end_wall_ns, end_mono_ns, reason])
+                .execute(params![
+                    process_instance_id,
+                    end_wall_ns,
+                    end_mono_ns,
+                    reason
+                ])
                 .map_err(map)?;
             }
             WriteRecord::HostSample(sample) => {
@@ -603,7 +610,11 @@ impl Store {
                     sample.procs_running.map(to_sql_i64),
                     sample.procs_blocked.map(to_sql_i64),
                     sample.pressure.cpu.and_then(|p| p.some_avg10),
-                    sample.pressure.cpu.and_then(|p| p.some_total_us).map(to_sql_i64),
+                    sample
+                        .pressure
+                        .cpu
+                        .and_then(|p| p.some_total_us)
+                        .map(to_sql_i64),
                     sample.pressure.memory.and_then(|p| p.some_avg10),
                     sample
                         .pressure
@@ -611,7 +622,11 @@ impl Store {
                         .and_then(|p| p.some_total_us)
                         .map(to_sql_i64),
                     sample.pressure.io.and_then(|p| p.some_avg10),
-                    sample.pressure.io.and_then(|p| p.some_total_us).map(to_sql_i64),
+                    sample
+                        .pressure
+                        .io
+                        .and_then(|p| p.some_total_us)
+                        .map(to_sql_i64),
                     to_sql_i64(sum_net(&sample.net, |n| n.rx_bytes)),
                     to_sql_i64(sum_net(&sample.net, |n| n.tx_bytes)),
                     to_sql_i64(sum_disk(&sample.disk, |d| d.read_bytes)),
@@ -952,9 +967,11 @@ impl Store {
     /// Read a metadata value.
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
         self.conn
-            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
             .optional()
             .map_err(|err| Error::Storage(format!("meta get: {err}")))
     }
@@ -962,9 +979,11 @@ impl Store {
     /// Maximum incident id currently stored (0 when none).
     pub fn max_incident_id(&self) -> Result<i64> {
         self.conn
-            .query_row("SELECT COALESCE(MAX(incident_id), 0) FROM incidents", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COALESCE(MAX(incident_id), 0) FROM incidents",
+                [],
+                |row| row.get(0),
+            )
             .map_err(|err| Error::Storage(format!("max incident id: {err}")))
     }
 
@@ -982,14 +1001,20 @@ fn sum_net(
     counters: &std::collections::BTreeMap<String, crate::model::NetCounters>,
     field: impl Fn(&crate::model::NetCounters) -> u64,
 ) -> u64 {
-    counters.values().map(|c| field(c)).fold(0u64, |acc, v| acc.saturating_add(v))
+    counters
+        .values()
+        .map(|c| field(c))
+        .fold(0u64, |acc, v| acc.saturating_add(v))
 }
 
 fn sum_disk(
     counters: &std::collections::BTreeMap<String, crate::model::DiskCounters>,
     field: impl Fn(&crate::model::DiskCounters) -> u64,
 ) -> u64 {
-    counters.values().map(|c| field(c)).fold(0u64, |acc, v| acc.saturating_add(v))
+    counters
+        .values()
+        .map(|c| field(c))
+        .fold(0u64, |acc, v| acc.saturating_add(v))
 }
 
 /// Serialize JSON with a byte bound; returns `"{}"` style placeholder on failure.
@@ -1064,7 +1089,9 @@ mod tests {
             stable_key: "h1".into(),
             name: "test-host".into(),
             source: "test".into(),
-            labels: [("env".to_string(), "test".to_string())].into_iter().collect(),
+            labels: [("env".to_string(), "test".to_string())]
+                .into_iter()
+                .collect(),
             first_seen_wall_ns: now,
             last_seen_wall_ns: now,
         };
@@ -1227,7 +1254,9 @@ mod tests {
         let count = |table: &str| -> i64 {
             store
                 .connection()
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
                 .expect("count")
         };
         for table in [
@@ -1273,7 +1302,9 @@ mod tests {
         // Gap resolution persisted.
         let resolved: Option<i64> = store
             .connection()
-            .query_row("SELECT resolved_wall_ns FROM coverage_gaps", [], |row| row.get(0))
+            .query_row("SELECT resolved_wall_ns FROM coverage_gaps", [], |row| {
+                row.get(0)
+            })
             .expect("gap");
         assert_eq!(resolved, Some(now + 1));
     }
@@ -1335,7 +1366,10 @@ mod tests {
             })])
             .expect("write");
         assert_eq!(
-            store.meta_get("clock_ticks_per_second").expect("get").as_deref(),
+            store
+                .meta_get("clock_ticks_per_second")
+                .expect("get")
+                .as_deref(),
             Some("100")
         );
         assert_eq!(store.max_incident_id().expect("max"), 0);
@@ -1344,13 +1378,17 @@ mod tests {
     #[test]
     fn begin_and_end_run() {
         let mut store = store();
-        let run = store.begin_run("h1", 100, "0.1.0", false, None).expect("run");
+        let run = store
+            .begin_run("h1", 100, "0.1.0", false, None)
+            .expect("run");
         store.end_run(run, 200).expect("end");
         let stopped: Option<i64> = store
             .connection()
-            .query_row("SELECT stopped_wall_ns FROM runs WHERE run_id = ?1", [run], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT stopped_wall_ns FROM runs WHERE run_id = ?1",
+                [run],
+                |row| row.get(0),
+            )
             .expect("run row");
         assert_eq!(stopped, Some(200));
     }

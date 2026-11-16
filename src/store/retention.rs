@@ -548,8 +548,7 @@ impl HostRaw {
 }
 
 fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Result<u64> {
-    let (start, end) =
-        rollup_window(store, "rollup_1m_cgroup_through_ns", now, policy.raw_hours)?;
+    let (start, end) = rollup_window(store, "rollup_1m_cgroup_through_ns", now, policy.raw_hours)?;
     if start >= end {
         return Ok(0);
     }
@@ -605,16 +604,12 @@ fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Resu
                 };
                 slot.add_counters(delta);
                 slot.add_memory(memory);
-                slot.io_read = slot.io_read.saturating_add(delta_io(
-                    &previous_io,
-                    &io,
-                    |entry| entry.read_bytes,
-                ));
-                slot.io_write = slot.io_write.saturating_add(delta_io(
-                    &previous_io,
-                    &io,
-                    |entry| entry.write_bytes,
-                ));
+                slot.io_read = slot
+                    .io_read
+                    .saturating_add(delta_io(&previous_io, &io, |entry| entry.read_bytes));
+                slot.io_write =
+                    slot.io_write
+                        .saturating_add(delta_io(&previous_io, &io, |entry| entry.write_bytes));
                 slot.psi_cpu_max = slot.psi_cpu_max.max(psi_cpu.unwrap_or(0.0));
                 slot.psi_mem_max = slot.psi_mem_max.max(psi_mem.unwrap_or(0.0));
                 slot.psi_io_max = slot.psi_io_max.max(psi_io.unwrap_or(0.0));
@@ -650,7 +645,10 @@ fn parse_io(json: Option<&str>) -> Vec<CgroupIoRaw> {
         .filter_map(|entry| {
             Some(CgroupIoRaw {
                 device: entry.get("device")?.as_str()?.to_string(),
-                read_bytes: entry.get("read_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                read_bytes: entry
+                    .get("read_bytes")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
                 write_bytes: entry
                     .get("write_bytes")
                     .and_then(|v| v.as_u64())
@@ -863,12 +861,18 @@ fn rollup_hour_range(store: &mut Store, start: i64, end: i64) -> Result<u64> {
                 slot.memory_weight = slot.memory_weight.saturating_add(sample_count.max(1));
             }
             slot.memory_max = slot.memory_max.max(memory_max.unwrap_or(0));
-            slot.io_read = slot.io_read.saturating_add(io_read.unwrap_or(0).max(0) as u64);
+            slot.io_read = slot
+                .io_read
+                .saturating_add(io_read.unwrap_or(0).max(0) as u64);
             slot.io_write = slot
                 .io_write
                 .saturating_add(io_write.unwrap_or(0).max(0) as u64);
-            slot.net_rx = slot.net_rx.saturating_add(net_rx.unwrap_or(0).max(0) as u64);
-            slot.net_tx = slot.net_tx.saturating_add(net_tx.unwrap_or(0).max(0) as u64);
+            slot.net_rx = slot
+                .net_rx
+                .saturating_add(net_rx.unwrap_or(0).max(0) as u64);
+            slot.net_tx = slot
+                .net_tx
+                .saturating_add(net_tx.unwrap_or(0).max(0) as u64);
         }
     }
 
@@ -992,20 +996,33 @@ mod tests {
         let mut store = Store::open_in_memory().expect("store");
         let now = 10 * HOUR_NS;
         write_host_run(&mut store, now - 20 * 60 * 1_000_000_000, 18);
-        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent")).expect("prune");
+        let report = prune(
+            &mut store,
+            &policy(100),
+            now,
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("prune");
         assert!(report.host_rollup_rows >= 1, "expected rollups: {report:?}");
         let avg: Option<f64> = store
             .connection()
-            .query_row("SELECT AVG(cpu_avg_pct) FROM rollup_1m", [], |row| row.get(0))
+            .query_row("SELECT AVG(cpu_avg_pct) FROM rollup_1m", [], |row| {
+                row.get(0)
+            })
             .expect("avg cpu");
         let avg = avg.expect("cpu rollup value");
         // 100 busy / 1000 total ticks == 10%.
         assert!((avg - 10.0).abs() < 0.5, "avg cpu {avg}");
         let samples: i64 = store
             .connection()
-            .query_row("SELECT SUM(sample_count) FROM rollup_1m", [], |row| row.get(0))
+            .query_row("SELECT SUM(sample_count) FROM rollup_1m", [], |row| {
+                row.get(0)
+            })
             .expect("samples");
-        assert!(samples >= 10, "rollup should aggregate samples, got {samples}");
+        assert!(
+            samples >= 10,
+            "rollup should aggregate samples, got {samples}"
+        );
     }
 
     #[test]
@@ -1016,7 +1033,13 @@ mod tests {
         write_host_run(&mut store, now - 3 * HOUR_NS, 3);
         // Recent samples (20 min) are kept.
         write_host_run(&mut store, now - 20 * 60 * 1_000_000_000, 18);
-        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent")).expect("prune");
+        let report = prune(
+            &mut store,
+            &policy(100),
+            now,
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("prune");
         assert!(report.deleted_host_samples >= 4, "{report:?}");
         let remaining: i64 = store
             .connection()
@@ -1025,7 +1048,9 @@ mod tests {
         assert!(remaining > 0, "recent samples must be kept");
         let oldest: i64 = store
             .connection()
-            .query_row("SELECT MIN(wall_ts_ns) FROM host_samples", [], |row| row.get(0))
+            .query_row("SELECT MIN(wall_ts_ns) FROM host_samples", [], |row| {
+                row.get(0)
+            })
             .expect("min");
         assert!(oldest >= now - HOUR_NS);
     }
@@ -1036,13 +1061,25 @@ mod tests {
         let now = 5 * HOUR_NS;
         write_host_run(&mut store, now - 20 * 60 * 1_000_000_000, 18);
         let policy = policy(100);
-        let first = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent")).expect("prune");
+        let first = prune(
+            &mut store,
+            &policy,
+            now,
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("prune");
         assert!(first.host_rollup_rows >= 1);
         let count_first: i64 = store
             .connection()
             .query_row("SELECT COUNT(*) FROM rollup_1m", [], |row| row.get(0))
             .expect("count");
-        let second = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent")).expect("prune");
+        let second = prune(
+            &mut store,
+            &policy,
+            now,
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("prune");
         assert_eq!(second.host_rollup_rows, 0, "no new buckets on rerun");
         let count_second: i64 = store
             .connection()
@@ -1059,26 +1096,30 @@ mod tests {
         let mut items = Vec::new();
         for step in 0..=18 {
             let wall = start + step as i64 * 10_000_000_000;
-            items.push(WriteItem::normal(WriteRecord::CgroupSample(
-                CgroupSample {
-                    stamps: stamps(wall, wall),
-                    entity_id: "cgroup:1:2".into(),
-                    path: "/system.slice/web.service".into(),
-                    cpu_usage_usec: Some(1_000 * step as u64),
-                    memory_current: Some(2_048 + step as u64),
-                    io: vec![crate::model::CgroupIo {
-                        device: "8:0".into(),
-                        read_bytes: Some(4_096 * step as u64),
-                        write_bytes: Some(8_192 * step as u64),
-                        read_ops: None,
-                        write_ops: None,
-                    }],
-                    ..Default::default()
-                },
-            )));
+            items.push(WriteItem::normal(WriteRecord::CgroupSample(CgroupSample {
+                stamps: stamps(wall, wall),
+                entity_id: "cgroup:1:2".into(),
+                path: "/system.slice/web.service".into(),
+                cpu_usage_usec: Some(1_000 * step as u64),
+                memory_current: Some(2_048 + step as u64),
+                io: vec![crate::model::CgroupIo {
+                    device: "8:0".into(),
+                    read_bytes: Some(4_096 * step as u64),
+                    write_bytes: Some(8_192 * step as u64),
+                    read_ops: None,
+                    write_ops: None,
+                }],
+                ..Default::default()
+            })));
         }
         store.write(&items).expect("write");
-        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent")).expect("prune");
+        let report = prune(
+            &mut store,
+            &policy(100),
+            now,
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("prune");
         assert!(report.cgroup_rollup_rows >= 1, "{report:?}");
         let (avg, total, io_read): (Option<f64>, i64, i64) = store
             .connection()
@@ -1088,7 +1129,10 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("rollup");
-        assert!(avg.is_none(), "cgroup percentages are derived at query time");
+        assert!(
+            avg.is_none(),
+            "cgroup percentages are derived at query time"
+        );
         assert!(total > 0, "cpu usecond deltas stored");
         assert!(io_read > 0, "io deltas stored");
     }
@@ -1134,19 +1178,29 @@ mod tests {
             })),
         ];
         store.write(&items).expect("write");
-        let report = prune(&mut store, &policy(100), now, std::path::Path::new("/nonexistent")).expect("prune");
+        let report = prune(
+            &mut store,
+            &policy(100),
+            now,
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("prune");
         let incident_logs: i64 = store
             .connection()
-            .query_row("SELECT COUNT(*) FROM logs WHERE incident_id = 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM logs WHERE incident_id = 1",
+                [],
+                |row| row.get(0),
+            )
             .expect("incident logs");
         assert_eq!(incident_logs, 1);
         let info_logs: i64 = store
             .connection()
-            .query_row("SELECT COUNT(*) FROM logs WHERE incident_id IS NULL", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM logs WHERE incident_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
             .expect("info logs");
         assert_eq!(info_logs, 0, "old non-incident info logs expire");
         let events: i64 = store
@@ -1164,11 +1218,19 @@ mod tests {
         let mut policy = policy(100);
         policy.raw_hours = 3;
         write_host_run(&mut store, now - 2 * HOUR_NS, 12);
-        let report = prune(&mut store, &policy, now, std::path::Path::new("/nonexistent")).expect("prune");
+        let report = prune(
+            &mut store,
+            &policy,
+            now,
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("prune");
         assert!(report.hour_rollup_rows >= 1, "{report:?}");
         let samples: i64 = store
             .connection()
-            .query_row("SELECT SUM(sample_count) FROM rollup_1h", [], |row| row.get(0))
+            .query_row("SELECT SUM(sample_count) FROM rollup_1h", [], |row| {
+                row.get(0)
+            })
             .expect("sum");
         assert!(samples >= 1);
     }
