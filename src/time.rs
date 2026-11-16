@@ -23,11 +23,15 @@ pub type WallNs = i64;
 pub type MonoNs = i64;
 
 /// A monotonic clock domain name as persisted in the database.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ClockDomain {
     /// Linux `CLOCK_MONOTONIC`, boot-relative.
     ClockMonotonic,
     /// Process-relative `std::time::Instant` fallback.
+    #[default]
     StdInstant,
     /// Synthetic domain used by deterministic tests and fixture replay.
     Simulated,
@@ -65,13 +69,52 @@ pub trait Clock: Send + Sync {
     fn sleep(&self, duration: Duration);
 }
 
-/// Names of both clocks as persisted alongside samples.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Both clocks plus the identity context needed to interpret them.
+///
+/// `boot_id` scopes the monotonic value (it resets across reboots) and `domain`
+/// records which monotonic clock produced it, as required by guide §7.2.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stamps {
     /// Wall-clock UTC nanoseconds.
     pub wall: WallNs,
     /// Monotonic nanoseconds.
     pub mono: MonoNs,
+    /// Kernel boot id (or simulated boot id) that scopes `mono`.
+    pub boot_id: String,
+    /// Monotonic clock domain.
+    pub domain: ClockDomain,
+}
+
+impl Stamps {
+    /// Build a full timestamp pair.
+    pub fn new(
+        wall: WallNs,
+        mono: MonoNs,
+        boot_id: impl Into<String>,
+        domain: ClockDomain,
+    ) -> Self {
+        Stamps {
+            wall,
+            mono,
+            boot_id: boot_id.into(),
+            domain,
+        }
+    }
+
+    /// Capture both clocks from a clock into full stamps.
+    pub fn capture(clock: &dyn Clock, boot_id: &str) -> Self {
+        Stamps {
+            wall: clock.wall_ns(),
+            mono: clock.mono_ns(),
+            boot_id: boot_id.to_string(),
+            domain: clock.domain(),
+        }
+    }
+
+    /// Whether the monotonic value can be compared across processes on this boot.
+    pub fn is_boot_scoped(&self) -> bool {
+        self.domain.is_boot_relative() && !self.boot_id.is_empty()
+    }
 }
 
 /// The real system clock.
@@ -86,14 +129,6 @@ impl SystemClock {
     pub fn new() -> Self {
         SystemClock {
             epoch: std::time::Instant::now(),
-        }
-    }
-
-    /// Snapshot both clocks with one shared instant so deltas stay consistent.
-    pub fn stamps(&self) -> Stamps {
-        Stamps {
-            wall: self.wall_ns(),
-            mono: self.mono_ns(),
         }
     }
 }
@@ -302,10 +337,10 @@ mod tests {
     #[test]
     fn stamps_pair_comes_from_a_trait_object() {
         let clock: SharedClock = Arc::new(FakeClock::standard());
-        let stamps = Stamps {
-            wall: clock.wall_ns(),
-            mono: clock.mono_ns(),
-        };
+        let stamps = Stamps::capture(clock.as_ref(), "test-boot");
         assert!(stamps.wall > 0 && stamps.mono > 0);
+        assert_eq!(stamps.boot_id, "test-boot");
+        assert_eq!(stamps.domain, ClockDomain::Simulated);
+        assert!(!stamps.is_boot_scoped(), "simulated clocks are not boot-relative");
     }
 }

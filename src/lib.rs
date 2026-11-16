@@ -18,6 +18,7 @@ pub mod config;
 pub mod error;
 pub mod model;
 pub mod paths;
+pub mod store;
 pub mod time;
 
 /// Product name used in reports and the CLI banner.
