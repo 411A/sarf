@@ -147,11 +147,13 @@ fn monotonic_ns_unix() -> MonoNs {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) != 0 {
+        if libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) != 0 {
             // Extremely unlikely: fall back to a process-relative reading.
             return -1;
         }
-        ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64
+        let secs = i128::from(ts.tv_sec);
+        let nanos = i128::from(ts.tv_nsec);
+        i64::try_from(secs.saturating_mul(1_000_000_000).saturating_add(nanos)).unwrap_or(i64::MAX)
     }
 }
 

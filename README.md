@@ -18,8 +18,8 @@ HTML report. There is no web server, no cloud dependency and no permanent UI pro
 | Service/container totals | cgroup v2 | CPU, memory, I/O, PIDs, pressure, throttling |
 | Process inventory and lifetimes | `/proc/PID` | PID-reuse-safe identity, parent/child, exec changes |
 | Selected process time series | `/proc/PID` | top-N by CPU plus memory contributors (bounded) |
-| Logs | explicit files, Docker CLI fallback | bounded per-source rings, severity, redaction |
-| Enrichment | Docker, tmux, Zellij, nginx, cloudflared, systemd | metadata only; never gates baseline accounting |
+| Logs | explicit files, Docker Engine API (CLI fallback) | bounded per-source rings, severity, redaction |
+| Enrichment | Docker Engine API, tmux, Zellij, nginx, cloudflared, systemd | metadata/events/logs only; never gates baseline accounting |
 | Evidence | incidents + high/low windows | correlated logs/events, confidence, coverage gaps |
 
 The universal baseline never depends on an integration. If Docker or tmux is absent,
@@ -32,6 +32,10 @@ cargo build --release
 sudo ./scripts/install.sh --binary target/release/sarf --start
 sarf doctor
 ```
+
+Add `--docker-group` to the installer only if you want full Docker metadata,
+events and logs. Docker group membership is root-equivalent; the default install
+keeps baseline accounting without Docker socket access.
 
 The installer creates a system user, `/var/lib/sarf`, a hardened systemd unit and the
 default configuration. For a manual install, put the binary anywhere and run:
@@ -71,6 +75,9 @@ A deterministic demo artifact can be generated without touching the host:
 ```bash
 cargo run --example demo_report -- sarf-data/reports/sample-report.html
 ```
+
+A generated demo artifact is at `sarf-data/reports/sample-report.html` (ignored by
+git, regenerate with the command above).
 
 ## Why it is lightweight
 
@@ -126,9 +133,11 @@ All commands accept global `--data-dir`, `--config` and `--json`.
 - Log messages are redacted for common credential shapes before storage.
 - Read-only collection: SARF never writes to `/proc`, `/sys/fs/cgroup`, journals,
   Docker configuration, tmux/Zellij sessions or monitored services.
-- Docker access uses bounded `docker ps`/`docker logs` CLI calls in v0.1. The Docker
-  socket is root-equivalent; do not grant it casually. The systemd unit does not
-  depend on Docker.
+- Docker uses the local Engine API for metadata, lifecycle events and bounded logs;
+  `docker ps`/`docker logs` CLI calls are only a fallback. Per-container network byte
+  counters are not yet a time series (host interface counters are). The Docker socket
+  is root-equivalent, so access is opt-in (`scripts/install.sh --docker-group`). The
+  systemd unit never depends on Docker.
 
 ## Current limitations (v0.1)
 
@@ -136,7 +145,8 @@ All commands accept global `--data-dir`, `--config` and `--json`.
   development tests only.
 - No taskstats, kernel process connector, eBPF, systemd D-Bus or journald reader.
   Processes shorter than the scan interval can be missed; coverage says so.
-- Docker Engine API/events are not used; metadata/logs use bounded CLI calls.
+- Docker Engine API is primary on Unix; the CLI is a fallback. No `docker stats`
+  loop and no direct reads of `/var/lib/docker` log files.
 - Zellij is session-level only (no stable pane PID contract).
 - Per-process historical rollups are not implemented; top-N raw samples only.
 - User-HZ is assumed to be 100 (the Linux userspace ABI value for supported 64-bit
@@ -149,16 +159,17 @@ All commands accept global `--data-dir`, `--config` and `--json`.
 ```text
 src/collect/     procfs, host, cgroup, process and log readers (fixture seam)
 src/catalog.rs   declarative integration descriptors + classification
-src/enrich/      bounded Docker/tmux/Zellij commands
+src/enrich/      Docker Engine API/CLI, tmux/Zellij adapters
 src/store/       schema, single writer, queries, rollups/retention
 src/analysis/    EWMA, incidents, high/low attribution windows
 src/report/      bounded data assembly + self-contained HTML assets
 src/daemon.rs    sampling loop, adaptive incidents, discovery cadence
 src/commands/    CLI formatting only
 tests/           policy, plan, integration, e2e, perf + fixtures
-docs/            ADRs, testing, spec traceability
+docs/            ADRs, Docker design, testing, spec traceability
 deploy/ scripts/ systemd unit, installer, verification scripts
 ```
 
 Engineering rules are in `AGENTS.md`; the binding architecture specification is
-`guide-ChatGPT.md`. Deviations and trade-offs are recorded in `docs/DECISIONS.md`.
+`guide-ChatGPT.md`. Docker Engine API design and permissions are in
+`docs/DOCKER.md`; deviations and trade-offs are recorded in `docs/DECISIONS.md`.

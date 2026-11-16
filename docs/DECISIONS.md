@@ -72,28 +72,48 @@ has no historical series. Cgroup/service totals remain the authoritative service
 **Upgrade path.** Add per-entity rollups for pinned processes when a real query needs
 them.
 
-## ADR-006 — Docker, tmux, Zellij and systemd use bounded CLI/metadata enrichment
+## ADR-006 — Docker Engine API primary; bounded CLI fallback; session/systemd metadata
 
-**Context.** The build environment has no Docker daemon, and v0.1 keeps dependencies
-small. The Docker socket is root-equivalent; D-Bus and the Zellij plugin API add
-platform-specific complexity.
+**Context.** The target VPS runs Docker 29.9.2 with API 1.56 over a Unix socket,
+cgroup v2 + systemd driver, and ten `json-file` containers. The socket is
+`root:docker` and therefore root-equivalent. The previous v0.1 prototype used only
+bounded `docker ps`/`docker logs` calls, which misses lifecycle events and is slower.
 
 **Decision.**
-- Docker metadata/logs: bounded `docker ps --no-trunc --format '{{json .}}'` and
-  `docker logs --timestamps --tail 200` with timeouts and byte caps.
+- Docker metadata, lifecycle and logs use the **local Engine API over the Unix
+  socket**: version negotiation, `containers/json?all=1`, one inspect per container,
+  bounded `events?since/until` windows, and bounded `containers/{id}/logs` reads with
+  Docker’s multiplex/TTY framing.
+- Container CPU/memory/I/O/PID accounting remains cgroup v2 + `/proc`; the Stats API
+  and `docker stats` are intentionally not used.
+- The client is generic: all containers are enumerated; names, images, labels,
+  Compose labels, health, restart policy, log driver/options/path, TTY, PID, cgroup
+  parent and networks are data, never matching rules. No project/image/name is
+  hardcoded.
+- The bounded CLI (`docker ps`/`docker logs`) remains a fallback when the socket is
+  absent/denied or on non-Unix development hosts.
+- `/var/lib/docker/**/*-json.log` is never read directly (daemon-managed, root-only).
+- Socket access is opt-in: `scripts/install.sh --docker-group` adds the service user
+  to the `docker` group and `SupplementaryGroups=docker` to the unit, with a
+  root-equivalent warning. Default deployment keeps baseline accounting without it.
 - tmux: `list-panes -a -F` with stable pane ids and pane PIDs.
 - Zellij: `list-sessions --short` for session-level detection only.
 - systemd units: inferred from cgroup path; no D-Bus.
 - nginx/cloudflared: process recognition and explicitly configured log files.
 
-Every failure is enrichment-only; baseline accounting continues.
+Every failure is enrichment-only; baseline accounting continues and the report marks
+Docker data unavailable rather than zero.
 
-**Consequences.** No container lifecycle event stream and no journald in v0.1.
-Docker CLI invocation is slower than the Engine API and must not run per sampling tick
-(it runs on the discovery cadence).
+**Consequences.** Low overhead on the surveyed host: ~1 event request/cycle, 10
+inspects/30 s, 10 log reads/30 s, and no Stats API calls. Log drivers `none`/remote
+are reported per source; TTY and multiplexed streams are both handled. The cost is
+that full Docker observation requires a root-equivalent socket permission, which is
+explicitly not the default. Inventory is capped (256 containers) and every response,
+frame and log line is bounded.
 
-**Upgrade path.** Add `bollard` (Engine API + events), zbus/systemd, journald cursors
-and a Zellij plugin only when their build/permission costs are acceptable.
+**Upgrade path.** Add a persistent events/log stream or `bollard` if request latency
+becomes material; add zbus/systemd, journald cursors and a Zellij plugin when their
+build/permission costs are acceptable.
 
 ## ADR-007 — Pinned crate versions reflect the offline Windows cache
 

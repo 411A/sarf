@@ -8,6 +8,7 @@
   var WINDOW_EVENT_CAP = 20;
   var WINDOW_CAP = 200;
   var TOP_CAP = 100;
+  var CONTAINER_CAP = 100;
   var LOG_CAP = 500;
   var EVENT_CAP = 300;
   var INCIDENT_CAP = 500;
@@ -50,6 +51,8 @@
     contributors: 'top',
     processes: 'processes',
     tree: 'processes',
+    containers: 'containers',
+    docker: 'containers',
     incidents: 'incidents',
     logs: 'logs',
     'logs-events': 'logs',
@@ -706,6 +709,7 @@
       safe('timeline', renderTimeline, $('timeline-charts'));
       safe('top', renderTop, $('top-panels'));
       safe('processes', initProcesses, $('process-view'));
+      safe('containers', renderContainers, $('containers-list'));
       safe('incidents', renderIncidents, $('incidents-table-wrap'));
       safe('logs', initLogs, $('log-table-wrap'));
       safe('events', renderEvents, $('events-table-wrap'));
@@ -876,7 +880,7 @@
       tab.tabIndex = active ? 0 : -1;
       tab.classList.toggle('is-active', active);
     });
-    var panels = ['summary', 'windows', 'timeline', 'top', 'processes', 'incidents', 'logs', 'coverage'];
+    var panels = ['summary', 'windows', 'timeline', 'top', 'processes', 'containers', 'incidents', 'logs', 'coverage'];
     panels.forEach(function (name) {
       var panel = $('panel-' + name);
       if (!panel) return;
@@ -3527,6 +3531,115 @@
     var noteParts = ['Showing ' + fmtCount(Math.min(events.length, EVENT_CAP)) + ' of ' + fmtCount(events.length) + ' embedded events.'];
     if (events.length > EVENT_CAP) noteParts.push('Display cap ' + fmtCount(EVENT_CAP) + '.');
     if (note) note.textContent = noteParts.join(' ');
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Containers                                                          */
+  /* ------------------------------------------------------------------ */
+
+  function renderContainers() {
+    var target = $('containers-list');
+    var note = $('containers-note');
+    if (!target) return;
+    clear(target);
+    var raw = def(state.data, 'containers', null);
+    if (!Array.isArray(raw)) {
+      target.appendChild(unavailableState('Container metadata unavailable', 'No container array was embedded. Docker data is unavailable, not zero.'));
+      setAside($('containers-count'), null, 'containers');
+      if (note) note.textContent = 'Docker Engine API metadata was not embedded.';
+      return;
+    }
+    setAside($('containers-count'), fmtCount(raw.length), 'containers', raw.length > CONTAINER_CAP ? 'display cap' : null);
+    if (!raw.length) {
+      target.appendChild(makeEmpty('No Docker containers observed', 'The daemon reported no container metadata for this window. Absence of Docker data is not evidence that no containers exist.'));
+      if (note) note.textContent = 'No container entities were stored.';
+      return;
+    }
+    var columns = [
+      { label: 'Container' },
+      { label: 'Image' },
+      { label: 'Compose' },
+      { label: 'State / health' },
+      { label: 'Log driver / options' },
+      { label: 'Network / IP' },
+      { label: 'Ports' },
+      { label: 'Mounts' },
+      { label: 'Restart / limits' },
+      { label: 'Working dir / user' }
+    ];
+    var table = buildTable(columns, 'Docker container metadata');
+    var listed = raw.slice(0, CONTAINER_CAP);
+    listed.forEach(function (container) {
+      if (!container || typeof container !== 'object') return;
+      var row = el('tr');
+      var nameCell = el('td', 'entity-cell');
+      nameCell.appendChild(el('span', 'entity-name', nonEmptyString(def(container, 'name', null)) || 'unnamed container'));
+      var id = strOrNull(def(container, 'id', null));
+      if (id) nameCell.appendChild(el('span', 'entity-id', id));
+      var seen = fmtStamp(def(container, 'last_seen', null));
+      if (seen) nameCell.appendChild(el('span', 'entity-id', 'last seen ' + seen));
+      row.appendChild(nameCell);
+      var imageCell = el('td');
+      var image = nonEmptyString(def(container, 'image', null));
+      if (image) imageCell.appendChild(el('span', '', image)); else imageCell.appendChild(dashSpan());
+      row.appendChild(imageCell);
+      var composeCell = el('td');
+      var project = nonEmptyString(def(container, 'compose_project', null));
+      var service = nonEmptyString(def(container, 'compose_service', null));
+      if (project) composeCell.appendChild(makeChip('project \u00b7 ' + project, 'tone-accent'));
+      if (service) { if (project) composeCell.appendChild(document.createTextNode(' ')); composeCell.appendChild(makeChip('service \u00b7 ' + service, 'tone-info')); }
+      if (!project && !service) composeCell.appendChild(dashSpan());
+      row.appendChild(composeCell);
+      var stateCell = el('td');
+      var state = nonEmptyString(def(container, 'state', null));
+      var health = nonEmptyString(def(container, 'health', null));
+      if (state) stateCell.appendChild(makeChip(state, state === 'running' ? 'tone-ok' : 'tone-neutral'));
+      if (health) { if (state) stateCell.appendChild(document.createTextNode(' ')); stateCell.appendChild(makeChip(health, health === 'healthy' ? 'tone-ok' : (health === 'unhealthy' ? 'tone-danger' : 'tone-warn'))); }
+      if (!state && !health) stateCell.appendChild(dashSpan());
+      row.appendChild(stateCell);
+      var logCell = el('td');
+      var driver = nonEmptyString(def(container, 'log_driver', null));
+      var options = nonEmptyString(def(container, 'log_options', null));
+      if (driver) logCell.appendChild(makeChip(driver, 'tone-neutral'));
+      if (options) logCell.appendChild(el('span', 'entity-id', options));
+      var logPath = nonEmptyString(def(container, 'log_path', null));
+      if (logPath) logCell.appendChild(el('span', 'entity-id', logPath));
+      if (!driver && !options && !logPath) logCell.appendChild(dashSpan());
+      row.appendChild(logCell);
+      var networkCell = el('td');
+      var networks = nonEmptyString(def(container, 'networks', null));
+      var ips = nonEmptyString(def(container, 'network_ips', null));
+      if (networks) networkCell.appendChild(el('span', '', networks)); else networkCell.appendChild(dashSpan());
+      if (ips) networkCell.appendChild(el('span', 'entity-id', ips));
+      row.appendChild(networkCell);
+      valueCell(row, nonEmptyString(def(container, 'ports', null)), 'num');
+      valueCell(row, nonEmptyString(def(container, 'mounts', null)), 'num');
+      var limits = [];
+      var restart = nonEmptyString(def(container, 'restart_policy', null));
+      var pid = numOrNull(def(container, 'pid', null));
+      var memory = numOrNull(def(container, 'memory_limit', null));
+      var nano = numOrNull(def(container, 'nano_cpus', null));
+      var pids = numOrNull(def(container, 'pids_limit', null));
+      if (restart) limits.push('restart ' + restart);
+      if (pid !== null) limits.push('pid ' + pid);
+      if (memory !== null) limits.push('mem ' + fmtBytes(memory));
+      if (nano !== null) limits.push('cpu ' + (nano / 1e9).toFixed(2));
+      if (pids !== null) limits.push('pids ' + pids);
+      valueCell(row, limits.length ? limits.join(' \u00b7 ') : null, 'num');
+      var workCell = el('td');
+      var working = nonEmptyString(def(container, 'working_dir', null));
+      var user = nonEmptyString(def(container, 'user', null));
+      if (working) workCell.appendChild(el('span', '', working));
+      if (user) workCell.appendChild(el('span', 'entity-id', 'user ' + user));
+      if (!working && !user) workCell.appendChild(dashSpan());
+      row.appendChild(workCell);
+      table.tbody.appendChild(row);
+    });
+    var wrapper = el('div', 'table-scroll');
+    wrapper.appendChild(table.table);
+    target.appendChild(wrapper);
+    appendBoundedNote(target, listed.length, raw.length, 'containers');
+    if (note) note.textContent = 'Metadata is observed through the Docker Engine API; log paths are shown for context and are never read directly.';
   }
 
   /* ------------------------------------------------------------------ */

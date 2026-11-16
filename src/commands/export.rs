@@ -102,12 +102,14 @@ pub fn export(
     let mut logs_filter = LogFilter::new(window);
     logs_filter.limit = context.config.report.max_logs;
     let logs = query::logs(conn, &logs_filter)?;
+    let containers = query::containers(conn, 256)?;
     let payload = match format {
         ExportFormat::Json => json!({
             "since": window.since,
             "until": window.until,
             "hostname": query::db_stats(conn)?.hostname,
             "usage": usage,
+            "containers": containers,
             "incidents": incidents,
             "logs": logs,
         }),

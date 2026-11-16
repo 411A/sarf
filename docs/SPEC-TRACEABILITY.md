@@ -14,7 +14,7 @@ as complete.
 | §5.3 | cgroup v2 discovery, counters, inode identity, read-only | `src/collect/cgroup.rs` | cgroup integration + policy read-only snapshot |
 | §5.4–5.6 | proc connector, taskstats, eBPF | **Not implemented in v0.1**; reported as gaps | `sarf capabilities`, coverage report |
 | §5.7 | PSI host/cgroup | `procfs::parse_pressure`, host/cgroup samples | parser + fixtures |
-| §5.8 | Docker discovery/metadata/log fallback | `src/enrich/docker.rs`, `collect/logs.rs` | Docker parser tests, absent-continuity test |
+| §5.8 | Docker Engine API inventory/inspect/events/logs, CLI fallback | `src/enrich/docker_api.rs`, `src/enrich/docker.rs`, `collect/logs.rs` | API parser/mock-socket tests, live Docker validation, absent-continuity test |
 | §5.9 | systemd unit mapping | cgroup → unit in `catalog.rs` | classification tests |
 | §5.10 | tmux panes, Zellij sessions | `src/enrich/sessions.rs` | parser tests; Zellij pane topology documented gap |
 | §5.11 | cron/scheduled jobs | **Not implemented in v0.1**; process visibility only | coverage notes |
@@ -28,7 +28,7 @@ as complete.
 | §9.1 | Bounded rings (lines/bytes/time) | `LogRing`, per-source policy | flood policy test |
 | §9.2–9.3 | Normalized records, severity, selective persistence | `LogRecord`, `detect_level`, `should_persist` | log integration tests |
 | §9.4 | Backpressure/fairness, drop counters | `MAX_LINES_PER_POLL`, per-source caps, health | flood test |
-| §9.5 | Docker log edge cases | CLI fallback + documented gaps | docs/ADR-006, capabilities |
+| §9.5 | Docker log edge cases | Engine API framing/TTY/log-driver handling + CLI fallback | docs/ADR-006, docs/DOCKER.md, mock/live tests |
 | §9.6 | Safe file following | rotation/truncation/partial handling | unit + integration tests |
 | §10.1–10.2 | EWMA baseline + absolute thresholds | `src/analysis/ewma.rs`, `incidents.rs` | EWMA/incident unit tests |
 | §10.3 | Thresholds/hysteresis/cooldown | incidents engine | incident tests |
@@ -47,7 +47,7 @@ as complete.
 | §17 | systemd unit, privilege model | `deploy/sarf.service`, `scripts/install.sh` | plan conformance; runtime requires a Linux host |
 | §18 | Privacy, read-only, failure safety | defaults, redaction, policy tests | `tests/policy.rs` |
 | §19 | Coverage/loss/degradation | health registry, gaps, writer drops | status/gaps/report coverage |
-| §21 | Test pyramid | `tests/*`, scripts, CI | verify scripts |
+| §21 | Test pyramid | `tests/*`, scripts, CI | verify scripts + Docker API mock/live validation |
 | §22 | Roadmap phases | see below | — |
 | §23 | Ponytail/SOLID discipline | no speculative framework; small modules; ADRs | review |
 
@@ -59,7 +59,7 @@ as complete.
 | 1 Host + cgroup v2 core | Done (fixture + Linux cross-check; live Linux validation via WSL/CI) |
 | 2 Universal process inventory | Done (inventory, identity, top-N samples, tree) |
 | 3 Process lifecycle events/taskstats | **Not in v0.1**; reconciliation scans only, gaps reported |
-| 4 Docker/systemd adapters | Partial: Docker bounded CLI, cgroup→unit mapping; no Docker events or D-Bus |
+| 4 Docker/systemd adapters | Partial: Docker Engine API (metadata/events/logs) + cgroup→unit mapping; no systemd D-Bus |
 | 5 Logs and incident forensics | Done (bounded sources, EWMA/threshold incidents, evidence capture) |
 | 6 Integration registry/TUI | Registry done; TUI not in v0.1 |
 | 7 Specialized adapters | Partial: nginx/cloudflared/tmux/Zellij/session recognition; no metrics endpoints |
@@ -70,8 +70,8 @@ as complete.
 
 ## Explicit deviations
 
-1. Docker/tmux/Zellij enrichment uses bounded CLI calls, not Engine API/D-Bus/plugin
-   API (ADR-006).
+1. Docker uses the local Engine API with a bounded CLI fallback; tmux/Zellij use
+   bounded CLI calls; no D-Bus/plugin API (ADR-006, `docs/DOCKER.md`).
 2. USER_HZ is assumed 100 (ADR-008).
 3. Windows identity is fixture-only (ADR-009).
 4. No graceful SIGINT handler in v0.1 (ADR-016).

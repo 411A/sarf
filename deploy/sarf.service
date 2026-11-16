@@ -8,9 +8,11 @@ After=local-fs.target
 #
 # Docker is optional. This unit has no Requires=/After= on docker.service or
 # docker.socket and does not add the sarf user to the docker group. Baseline
-# process accounting works without Docker access; Docker enrichment degrades to
-# "unavailable" (never zero activity) unless the operator explicitly grants the
-# sarf user access to the Docker socket.
+# process accounting works without Docker access; the Engine API/CLI adapters
+# degrade to "unavailable" (never zero activity) unless the operator explicitly
+# grants socket access. Docker group membership is root-equivalent; opt in with
+# `scripts/install.sh --docker-group` (adds SupplementaryGroups=docker) only if
+# full container metadata, events and logs are required.
 
 [Service]
 Type=simple

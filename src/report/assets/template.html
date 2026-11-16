@@ -93,14 +93,17 @@
         <button class="tab" id="tab-processes" type="button" role="tab" aria-selected="false" aria-controls="panel-processes" tabindex="-1" data-view="processes">
           <span class="tab-index" aria-hidden="true">05</span>Processes
         </button>
+        <button class="tab" id="tab-containers" type="button" role="tab" aria-selected="false" aria-controls="panel-containers" tabindex="-1" data-view="containers">
+          <span class="tab-index" aria-hidden="true">06</span>Containers<span class="tab-count" id="tab-count-containers"></span>
+        </button>
         <button class="tab" id="tab-incidents" type="button" role="tab" aria-selected="false" aria-controls="panel-incidents" tabindex="-1" data-view="incidents">
-          <span class="tab-index" aria-hidden="true">06</span>Incidents<span class="tab-count" id="tab-count-incidents"></span>
+          <span class="tab-index" aria-hidden="true">07</span>Incidents<span class="tab-count" id="tab-count-incidents"></span>
         </button>
         <button class="tab" id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" tabindex="-1" data-view="logs">
-          <span class="tab-index" aria-hidden="true">07</span>Logs &amp; events
+          <span class="tab-index" aria-hidden="true">08</span>Logs &amp; events
         </button>
         <button class="tab" id="tab-coverage" type="button" role="tab" aria-selected="false" aria-controls="panel-coverage" tabindex="-1" data-view="coverage">
-          <span class="tab-index" aria-hidden="true">08</span>Coverage &amp; gaps
+          <span class="tab-index" aria-hidden="true">09</span>Coverage &amp; gaps
         </button>
       </div>
     </div>
@@ -221,6 +224,19 @@
     </div>
     <p class="render-note" id="process-note" role="status"></p>
     <div class="process-view" id="process-view"></div>
+  </section>
+
+  <section class="panel" id="panel-containers" role="tabpanel" aria-labelledby="tab-containers" tabindex="0" hidden>
+    <div class="section-head">
+      <div class="section-heading">
+        <p class="section-index">06 / Containers</p>
+        <h2>Docker containers</h2>
+        <p class="section-lede">Generic Engine API metadata for every observed container: image, state/health, Compose identity, log driver/options, networks/ports, mounts, restart policy and limits. Container names and projects are data, not matching rules.</p>
+      </div>
+      <div class="section-aside" id="containers-count"></div>
+    </div>
+    <p class="render-note" id="containers-note" role="status"></p>
+    <div id="containers-list"></div>
   </section>
 
   <section class="panel" id="panel-incidents" role="tabpanel" aria-labelledby="tab-incidents" tabindex="0" hidden>

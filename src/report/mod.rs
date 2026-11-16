@@ -68,6 +68,8 @@ pub struct ReportDocument {
     pub top: TopContributors,
     /// Process tree and lifetimes.
     pub processes: ProcessTreeView,
+    /// Docker container metadata (project/container agnostic).
+    pub containers: Vec<ContainerView>,
     /// Incidents overlapping the window.
     pub incidents: Vec<IncidentView>,
     /// Stored log evidence.
@@ -309,6 +311,61 @@ pub struct ProcessNodeView {
     pub end_reason: Option<String>,
 }
 
+/// One container metadata row.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContainerView {
+    /// Entity id.
+    pub id: String,
+    /// Container name.
+    pub name: String,
+    /// Image.
+    pub image: Option<String>,
+    /// State.
+    pub state: Option<String>,
+    /// Health status.
+    pub health: Option<String>,
+    /// Compose project.
+    pub compose_project: Option<String>,
+    /// Compose service.
+    pub compose_service: Option<String>,
+    /// Log driver.
+    pub log_driver: Option<String>,
+    /// Log options.
+    pub log_options: Option<String>,
+    /// Docker-managed log path (metadata only).
+    pub log_path: Option<String>,
+    /// Restart policy.
+    pub restart_policy: Option<String>,
+    /// Main PID.
+    pub pid: Option<u32>,
+    /// Network names.
+    pub networks: Option<String>,
+    /// Network addresses.
+    pub network_ips: Option<String>,
+    /// Published ports.
+    pub ports: Option<String>,
+    /// Mounts.
+    pub mounts: Option<String>,
+    /// Hostname.
+    pub hostname: Option<String>,
+    /// Configured user.
+    pub user: Option<String>,
+    /// Working directory.
+    pub working_dir: Option<String>,
+    /// Restart count.
+    pub restart_count: Option<u32>,
+    /// Memory limit bytes.
+    pub memory_limit: Option<u64>,
+    /// Nano CPU limit.
+    pub nano_cpus: Option<i64>,
+    /// PIDs limit.
+    pub pids_limit: Option<i64>,
+    /// First observation.
+    pub first_seen: i64,
+    /// Last observation.
+    pub last_seen: i64,
+}
+
 /// One incident row.
 #[derive(Debug, Clone, Serialize)]
 pub struct IncidentView {
@@ -547,6 +604,28 @@ pub fn build(
         .into_iter()
         .map(incident_view)
         .collect();
+    let mut containers: Vec<ContainerView> = query::containers(conn, 256)?
+        .into_iter()
+        .map(container_view)
+        .collect();
+    if let Some(service) = &options.service {
+        let needle = service.to_ascii_lowercase();
+        containers.retain(|container| {
+            container.name.to_ascii_lowercase().contains(&needle)
+                || container
+                    .compose_service
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains(&needle))
+                || container
+                    .compose_project
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains(&needle))
+                || container
+                    .image
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains(&needle))
+        });
+    }
 
     let mut log_filter = LogFilter::new(window);
     log_filter.limit = config.report.max_logs;
@@ -607,6 +686,7 @@ pub fn build(
         windows,
         top,
         processes: nodes,
+        containers,
         incidents,
         logs: logs.into_iter().map(log_view).collect(),
         events: events.into_iter().map(event_view).collect(),
@@ -888,6 +968,47 @@ fn process_nodes(
         nodes,
         total: query::window_counts(conn, window)?.processes,
     })
+}
+
+fn container_view(row: query::ContainerRow) -> ContainerView {
+    let label = |key: &str| {
+        row.labels
+            .get(key)
+            .cloned()
+            .filter(|value| !value.is_empty())
+    };
+    let number = |key: &str| {
+        row.labels
+            .get(key)
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    ContainerView {
+        id: row.entity_id,
+        name: row.name,
+        image: label("image"),
+        state: label("state"),
+        health: label("health"),
+        compose_project: label("compose_project"),
+        compose_service: label("compose_service"),
+        log_driver: label("log_driver"),
+        log_options: label("log_options"),
+        log_path: label("log_path"),
+        restart_policy: label("restart_policy"),
+        pid: number("pid").and_then(|value| u32::try_from(value).ok()),
+        networks: label("networks"),
+        network_ips: label("network_ips"),
+        ports: label("ports"),
+        mounts: label("mounts"),
+        hostname: label("hostname"),
+        user: label("user"),
+        working_dir: label("working_dir"),
+        restart_count: number("restart_count").and_then(|value| u32::try_from(value).ok()),
+        memory_limit: number("memory_limit"),
+        nano_cpus: number("nano_cpus").and_then(|value| i64::try_from(value).ok()),
+        pids_limit: number("pids_limit").and_then(|value| i64::try_from(value).ok()),
+        first_seen: row.first_seen_wall_ns,
+        last_seen: row.last_seen_wall_ns,
+    }
 }
 
 fn incident_view(incident: Incident) -> IncidentView {

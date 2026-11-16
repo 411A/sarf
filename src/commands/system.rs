@@ -235,6 +235,20 @@ pub fn doctor(context: &Context) -> Result<i32> {
             ),
         ));
     }
+    let docker_socket = Path::new("/var/run/docker.sock");
+    checks.push(Check::new(
+        "docker socket",
+        if docker_socket.exists() { "ok" } else { "warn" },
+        if docker_socket.exists() {
+            format!(
+                "{} present; Engine API needs read/write access (root-equivalent)",
+                docker_socket.display()
+            )
+        } else {
+            "no /var/run/docker.sock; Engine API unavailable, CLI fallback may still work"
+                .to_string()
+        },
+    ));
     checks.push(Check::new(
         "process events",
         "warn",
@@ -445,7 +459,12 @@ pub fn capabilities(context: &Context) -> Result<i32> {
         capability(
             "docker",
             crate::enrich::find_in_path("docker").is_some(),
-            "bounded docker ps metadata; Engine API/events planned",
+            "container metadata/events/logs; bounded CLI fallback",
+        ),
+        capability(
+            "docker_engine_api",
+            Path::new("/var/run/docker.sock").exists(),
+            "local Unix socket Engine API (versioned, bounded requests)",
         ),
         capability(
             "tmux",

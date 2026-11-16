@@ -82,6 +82,29 @@ fn seed() -> Seeded {
             first_seen_wall_ns: base,
             last_seen_wall_ns: base,
         })),
+        WriteItem::normal(WriteRecord::Entity(Entity {
+            entity_id: "container:abcdef012345".into(),
+            kind: EntityKind::Container,
+            stable_key: "abcdef0123456789".into(),
+            name: "demo-web".into(),
+            source: "docker".into(),
+            labels: BTreeMap::from([
+                ("image".into(), "example/web:1".into()),
+                ("state".into(), "running".into()),
+                ("health".into(), "healthy".into()),
+                ("compose_project".into(), "demo".into()),
+                ("compose_service".into(), "web".into()),
+                ("log_driver".into(), "json-file".into()),
+                ("log_options".into(), "max-size=1m,max-file=2".into()),
+                ("ports".into(), "127.0.0.1:8080->80/tcp".into()),
+                ("networks".into(), "demo-net".into()),
+                ("network_ips".into(), "demo-net=172.20.0.2".into()),
+                ("restart_policy".into(), "unless-stopped".into()),
+                ("pid".into(), "4242".into()),
+            ]),
+            first_seen_wall_ns: base,
+            last_seen_wall_ns: base,
+        })),
         WriteItem::normal(WriteRecord::ProcessLifetime(ProcessLifetimeRow {
             process_instance_id: "proc:boot-report:200:20".into(),
             host_id: format!("host:{BOOT}"),
@@ -352,6 +375,15 @@ fn report_detects_high_cpu_and_names_contributors_with_evidence() {
 
     let top_cpu = &document.top.cpu;
     assert!(top_cpu.iter().any(|row| row.name.contains("nginx")));
+    assert_eq!(document.containers.len(), 1);
+    let container = &document.containers[0];
+    assert_eq!(container.name, "demo-web");
+    assert_eq!(container.image.as_deref(), Some("example/web:1"));
+    assert_eq!(container.health.as_deref(), Some("healthy"));
+    assert_eq!(container.compose_project.as_deref(), Some("demo"));
+    assert_eq!(container.log_driver.as_deref(), Some("json-file"));
+    assert_eq!(container.pid, Some(4242));
+    assert_eq!(container.ports.as_deref(), Some("127.0.0.1:8080->80/tcp"));
     assert!(document
         .processes
         .nodes
@@ -375,11 +407,14 @@ fn report_html_has_required_views_and_no_network_references() {
         "id=\"panel-timeline\"",
         "id=\"panel-top\"",
         "id=\"panel-processes\"",
+        "id=\"panel-containers\"",
         "id=\"panel-incidents\"",
         "id=\"panel-logs\"",
         "id=\"panel-coverage\"",
         "What happened",
         "Ranked contributors",
+        "Docker containers",
+        "demo-web",
         "Coverage",
         "Unavailable",
     ] {

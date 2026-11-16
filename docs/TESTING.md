@@ -83,17 +83,31 @@ host, not claims.
 - A killed daemon (SIGINT) leaves an open run row (ADR-016); bounded `--cycles` is the
   supported scripted shutdown.
 
+## Docker validation
+
+- Unit tests decode Content-Length/chunked HTTP, Docker's multiplex stream, TTY raw
+  streams, event JSON, inspect metadata and URL encoding.
+- A mock Unix-socket test exercises version negotiation, inventory and one inspect
+  without a Docker daemon (runs in Linux CI).
+- Live validation on WSL2 Docker created an arbitrary `alpine` container with
+  non-survey labels, then confirmed the Engine API discovered its entity metadata
+  (Compose project/service, image, log driver/path, network/IP, PID, restart policy),
+  captured its `create`/`start` events, and persisted its ERROR log lines through the
+  bounded log ring. The probe container and temporary data were removed afterward.
+- The fixture e2e config disables Docker so replay is deterministic and never reads
+  the host daemon; Docker is validated by the dedicated API/live tests instead.
+
 ## Recorded measurements (2026-11-16, development host)
 
 Windows 11, Rust 1.98.1, release profile, fixture-driven perf test:
 
 | Measurement | Result |
 |---|---|
-| 2,000-process inventory scan | 495 ms (≈4,037 processes/s); bounded samples |
-| 20,000 host rows through the writer | 42.5 ms (≈470,405 rows/s) |
-| Report build + render, 599 points | 4.0 ms, 278,113 bytes |
+| 2,000-process inventory scan | 566 ms (≈3,532 processes/s); bounded samples |
+| 20,000 host rows through the writer | 50.6 ms (≈394,980 rows/s) |
+| Report build + render, 599 points | 5.0 ms, 286,165 bytes |
 
-WSL2 Ubuntu 22.04, Linux 6.6.87, debug profile: 163 unit tests, all integration/e2e/
+WSL2 Ubuntu 22.04, Linux 6.6.87, debug profile: 173 unit tests, all integration/e2e/
 policy/plan tests pass; a live 4-cycle run read host/cgroup/PSI counters, discovered 81
 processes, wrote 54 cgroup samples, and produced a 271 KiB report with zero writer
 drops. These numbers are environment-specific measurements, not guarantees.

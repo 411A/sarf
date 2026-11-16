@@ -362,12 +362,13 @@ incident_days = 180
 log_days = 7
 
 [integrations]
-docker = "auto"
-tmux = "auto"
-zellij = "auto"
-systemd = "auto"
-nginx = "auto"
-cloudflared = "auto"
+# Fixture replay must be deterministic and must not read the host Docker daemon.
+docker = "off"
+tmux = "off"
+zellij = "off"
+systemd = "off"
+nginx = "off"
+cloudflared = "off"
 
 [report]
 bucket_secs = 60

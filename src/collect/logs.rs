@@ -473,6 +473,8 @@ fn split_docker_timestamp(line: &str) -> (Option<i64>, &str) {
 enum Tail {
     File(FileFollower),
     Docker(DockerFollower),
+    /// Lines are pushed by an external bounded collector (Docker Engine API).
+    External,
 }
 
 #[derive(Debug)]
@@ -539,6 +541,35 @@ pub struct LogPulse {
 pub struct LogManager {
     sources: Vec<ManagedSource>,
     policy: LogPolicy,
+    max_sources: usize,
+}
+
+/// A source created at runtime by the Docker Engine API collector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalSource {
+    /// Stable source id, e.g. `docker:<container-name>`.
+    pub source_id: String,
+    /// `docker` (kept for report transparency).
+    pub kind: String,
+    /// Container name or bounded target description.
+    pub target: String,
+    /// Tool hint.
+    pub entity_hint: Option<String>,
+    /// Entity id attached to every record.
+    pub entity_id: Option<String>,
+}
+
+/// One line supplied by an external collector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalLogLine {
+    /// Source timestamp; ingestion time is used when absent.
+    pub wall_ns: Option<i64>,
+    /// stdout/stderr classification.
+    pub stream: LogStream,
+    /// Raw message without the transport timestamp.
+    pub text: String,
+    /// Whether the transport truncated the line.
+    pub truncated: bool,
 }
 
 impl LogManager {
@@ -550,7 +581,26 @@ impl LogManager {
             .iter()
             .map(|source| managed_source(source, &policy))
             .collect();
-        Self { sources, policy }
+        Self {
+            sources,
+            policy,
+            max_sources: config.logs.max_sources,
+        }
+    }
+
+    /// Whether a source id already exists.
+    pub fn source_exists(&self, source_id: &str) -> bool {
+        self.sources.iter().any(|source| source.id == source_id)
+    }
+
+    /// Number of managed sources (configured plus runtime Docker log sources).
+    pub const fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// Whether one more runtime source fits under `logs.max_sources`.
+    pub const fn has_source_capacity(&self) -> bool {
+        self.sources.len() < self.max_sources
     }
 
     /// Poll every file source once.
@@ -558,7 +608,7 @@ impl LogManager {
         let mut pulse = LogPulse::default();
         let policy = &self.policy;
         for source in &mut self.sources {
-            if matches!(source.tail, Tail::Docker(_)) {
+            if matches!(source.tail, Tail::Docker(_) | Tail::External) {
                 continue;
             }
             Self::poll_source(policy, source, stamps, &mut pulse);
@@ -588,6 +638,7 @@ impl LogManager {
         let batch = match &mut source.tail {
             Tail::File(follower) => follower.poll(policy),
             Tail::Docker(follower) => follower.poll(),
+            Tail::External => PollBatch::default(),
         };
         if batch.dropped > 0 {
             source.dropped = source.dropped.saturating_add(batch.dropped);
@@ -646,6 +697,109 @@ impl LogManager {
                 pulse.records.push(record);
             }
         }
+    }
+
+    /// Ingest lines from a bounded external collector (Docker Engine API).
+    ///
+    /// The source is created on first use. If `logs.max_sources` is already reached,
+    /// the lines are rejected and counted rather than silently expanding memory.
+    pub fn ingest_external(
+        &mut self,
+        descriptor: &ExternalSource,
+        lines: Vec<ExternalLogLine>,
+        stamps: &Stamps,
+    ) -> LogPulse {
+        let mut pulse = LogPulse::default();
+        let index = if let Some(index) = self
+            .sources
+            .iter()
+            .position(|source| source.id == descriptor.source_id)
+        {
+            index
+        } else {
+            if !self.has_source_capacity() {
+                // Prefer evicting the oldest runtime Docker ring over refusing a new
+                // container forever. Persisted error/incident evidence is already in
+                // SQLite; the ring is only the bounded live evidence window.
+                if let Some(index) = self
+                    .sources
+                    .iter()
+                    .position(|source| matches!(source.tail, Tail::External))
+                {
+                    self.sources.remove(index);
+                } else {
+                    pulse.errors.push((
+                        descriptor.source_id.clone(),
+                        "logs.max_sources reached; Docker log source not added".to_string(),
+                    ));
+                    return pulse;
+                }
+            }
+            self.sources.push(ManagedSource {
+                id: descriptor.source_id.clone(),
+                kind: descriptor.kind.clone(),
+                target: descriptor.target.clone(),
+                entity_hint: descriptor.entity_hint.clone(),
+                max_lines: self.policy.ring_lines,
+                max_bytes: self.policy.ring_bytes,
+                tail: Tail::External,
+                ring: LogRing::default(),
+                received: 0,
+                dropped: 0,
+                truncated: 0,
+                last_error: None,
+                availability: Availability::Available,
+            });
+            self.sources.len() - 1
+        };
+        let mut source_policy = self.policy.clone();
+        {
+            let source = &self.sources[index];
+            source_policy.ring_lines = source.max_lines;
+            source_policy.ring_bytes = source.max_bytes;
+        }
+        let source = &mut self.sources[index];
+        source.availability = Availability::Available;
+        source.last_error = None;
+        for line in lines {
+            source.received = source.received.saturating_add(1);
+            pulse.received = pulse.received.saturating_add(1);
+            let wall_ns = line.wall_ns.unwrap_or(stamps.wall);
+            let level = detect_level(&line.text);
+            let (message, redacted) = redact(&line.text);
+            let (message, truncated) =
+                crate::store::truncate_utf8(&message, self.policy.max_line_bytes);
+            let record = LogRecord {
+                wall_ns,
+                mono_ns: Some(stamps.mono),
+                source_id: source.id.clone(),
+                entity_id: descriptor.entity_id.clone(),
+                stream: line.stream,
+                level: Some(level),
+                message,
+                truncated: line.truncated || truncated,
+                incident_id: None,
+                redacted,
+            };
+            if record.truncated {
+                source.truncated = source.truncated.saturating_add(1);
+                pulse.truncated = pulse.truncated.saturating_add(1);
+            }
+            let dropped = source
+                .ring
+                .push(record.clone(), stamps.wall, &source_policy);
+            if dropped > 0 {
+                source.dropped = source.dropped.saturating_add(dropped);
+                pulse.dropped = pulse.dropped.saturating_add(dropped);
+                if !pulse.floods.contains(&source.id) {
+                    pulse.floods.push(source.id.clone());
+                }
+            }
+            if self.policy.should_persist(&record) {
+                pulse.records.push(record);
+            }
+        }
+        pulse
     }
 
     /// Recent records across all sources for an incident evidence window.
@@ -1039,6 +1193,97 @@ mod tests {
             .expect("open")
             .write_all(content)
             .expect("append");
+    }
+
+    #[test]
+    fn external_docker_lines_are_normalized_bounded_and_attributed() {
+        let config = Config::default();
+        let mut manager = LogManager::new(&config, policy());
+        let source = ExternalSource {
+            source_id: "docker:web".into(),
+            kind: "docker".into(),
+            target: "web".into(),
+            entity_hint: Some("web".into()),
+            entity_id: Some("container:abcdef012345".into()),
+        };
+        let lines = vec![
+            ExternalLogLine {
+                wall_ns: Some(1_700_000_000_000_000_000),
+                stream: LogStream::Stdout,
+                text: "INFO started".into(),
+                truncated: false,
+            },
+            ExternalLogLine {
+                wall_ns: Some(1_700_000_001_000_000_000),
+                stream: LogStream::Stderr,
+                text: "ERROR connection refused: password=hunter2".into(),
+                truncated: false,
+            },
+            ExternalLogLine {
+                wall_ns: None,
+                stream: LogStream::Stdout,
+                text: "x".repeat(10_000),
+                truncated: true,
+            },
+        ];
+        let pulse = manager.ingest_external(&source, lines, &stamps(1_700_000_010_000_000_000));
+        assert_eq!(pulse.received, 3);
+        assert!(!pulse.records.is_empty());
+        assert!(pulse.records.iter().any(|record| {
+            record.entity_id.as_deref() == Some("container:abcdef012345")
+                && record.level == Some(Severity::Error)
+        }));
+        assert!(pulse
+            .records
+            .iter()
+            .all(|record| !record.message.contains("hunter2")));
+        let health = manager
+            .health()
+            .into_iter()
+            .find(|source| source.source_id == "docker:web")
+            .expect("external source health");
+        assert_eq!(health.kind, "docker");
+        assert_eq!(health.ring_lines, 3);
+        assert!(health.truncated >= 1);
+    }
+
+    #[test]
+    fn external_sources_respect_the_global_source_cap() {
+        let mut config = Config::default();
+        config.logs.max_sources = 1;
+        let mut manager = LogManager::new(&config, policy());
+        let make = |id: &str| ExternalSource {
+            source_id: id.to_string(),
+            kind: "docker".into(),
+            target: id.into(),
+            entity_hint: None,
+            entity_id: None,
+        };
+        let first = manager.ingest_external(
+            &make("docker:one"),
+            vec![ExternalLogLine {
+                wall_ns: None,
+                stream: LogStream::Stdout,
+                text: "one".into(),
+                truncated: false,
+            }],
+            &stamps(1),
+        );
+        assert!(first.errors.is_empty());
+        let second = manager.ingest_external(
+            &make("docker:two"),
+            vec![ExternalLogLine {
+                wall_ns: None,
+                stream: LogStream::Stdout,
+                text: "two".into(),
+                truncated: false,
+            }],
+            &stamps(2),
+        );
+        assert!(second.errors.is_empty());
+        assert_eq!(manager.source_count(), 1);
+        assert!(manager.source_exists("docker:two"));
+        assert!(!manager.source_exists("docker:one"));
     }
 
     #[test]

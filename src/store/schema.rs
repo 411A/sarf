@@ -1,4 +1,4 @@
-//! SQLite schema and migrations.
+//! `SQLite` schema and migrations.
 //!
 //! The schema follows `guide-ChatGPT.md` §11.2/§11.3 with two deliberate, documented
 //! extensions: a `runs` table (one row per daemon run, so reports can distinguish

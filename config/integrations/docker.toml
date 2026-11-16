@@ -4,9 +4,9 @@ name = "Docker Engine"
 category = "container_runtime"
 executables = ["docker", "dockerd", "containerd", "containerd-shim", "docker-containerd"]
 comm = ["dockerd", "containerd"]
-description = "Container discovery, names/images from bounded CLI metadata, and lifecycle correlation. Never required for baseline process accounting."
+description = "Container discovery, metadata, lifecycle events and bounded logs through the local Engine API, with a bounded CLI fallback. Never required for baseline process accounting."
 default_enabled = true
-capabilities = ["container_lifecycle", "process_enrichment", "log_source"]
+capabilities = ["engine_api", "container_lifecycle", "container_events", "process_enrichment", "log_source"]
 
 [[roles]]
 label = "docker daemon"

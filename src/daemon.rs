@@ -1,6 +1,6 @@
 //! Synchronous collection daemon (guide §7, §11.1, §12.1).
 //!
-//! Two threads only: this sampling loop and one SQLite writer. Host counters are read
+//! Two threads only: this sampling loop and one `SQLite` writer. Host counters are read
 //! every tick; cgroup and process scans follow their configured ratios; discovery of
 //! Docker/sessions runs on the slower cadence. Everything submitted to the writer is
 //! bounded, and a finite `--cycles` run is deterministic under a simulated clock so
@@ -18,18 +18,24 @@ use crate::analysis::incidents::{IncidentEngine, Signal};
 use crate::catalog::{self, Catalog};
 use crate::collect::cgroup::{CgroupCollector, CgroupCycle};
 use crate::collect::host::HostCollector;
+#[cfg(unix)]
+use crate::collect::logs::{ExternalLogLine, ExternalSource};
 use crate::collect::logs::{LogManager, LogPolicy, LogPulse};
 use crate::collect::process::ProcessCollector;
 use crate::collect::process::ProcessCycle;
 use crate::collect::{HealthRegistry, HostFacts, SourceRoot};
 use crate::config::{Config, Toggle};
 use crate::enrich::docker::{self, ContainerInfo};
+#[cfg(unix)]
+use crate::enrich::docker_api;
 use crate::enrich::sessions::{self, SessionDiscovery};
 use crate::error::{Error, Result};
 use crate::model::{
     Availability, ConfiguredState, CoverageGap, Entity, EntityKind, HostSample, Metric, Severity,
     WritePriority,
 };
+#[cfg(unix)]
+use crate::model::{EventKind, EventRecord};
 use crate::paths::DataDir;
 use crate::store::retention::RetentionPolicy;
 use crate::store::writer::{SubmitOutcome, Writer, WriterStats};
@@ -90,6 +96,17 @@ struct Enrichment {
     zellij: SessionDiscovery,
     docker: docker::DockerDiscovery,
     last_cycle: u64,
+    #[cfg(unix)]
+    docker_api: Option<docker_api::DockerApi>,
+    #[cfg(unix)]
+    docker_api_error: Option<String>,
+    #[cfg(unix)]
+    docker_event_ns: i64,
+    #[cfg(unix)]
+    docker_log_cursors: HashMap<String, i64>,
+    /// Whether a Docker availability gap was already reported in this run.
+    docker_error_reported: bool,
+    force_discovery: bool,
 }
 
 impl Default for Enrichment {
@@ -101,6 +118,16 @@ impl Default for Enrichment {
             zellij: SessionDiscovery::default(),
             docker: docker::DockerDiscovery::default(),
             last_cycle: u64::MAX,
+            #[cfg(unix)]
+            docker_api: None,
+            #[cfg(unix)]
+            docker_api_error: None,
+            #[cfg(unix)]
+            docker_event_ns: 0,
+            #[cfg(unix)]
+            docker_log_cursors: HashMap::new(),
+            docker_error_reported: false,
+            force_discovery: false,
         }
     }
 }
@@ -400,6 +427,30 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         catalog.clone(),
     );
     let mut enrichment = Enrichment::default();
+    #[cfg(unix)]
+    if options.config.integrations.docker.should_attempt() {
+        match docker_api::DockerApi::connect_default() {
+            Ok(api) => {
+                health.coverage(
+                    "docker_api",
+                    json!({
+                        "backend": "engine_api",
+                        "socket": api.socket(),
+                        "api_prefix": api.api_prefix(),
+                        "server_version": api.server_version(),
+                        "api_version": api.api_version(),
+                    }),
+                );
+                health.success("docker_api", first_wall);
+                enrichment.docker_event_ns = first_wall.saturating_sub(60_000_000_000);
+                enrichment.docker_api = Some(api);
+            }
+            Err(err) => {
+                enrichment.docker_api_error = Some(err.to_string());
+                health.error("docker_api", first_wall, &err.to_string());
+            }
+        }
+    }
     let writer = Writer::spawn(store, 4096)?;
 
     probe_coverage(&fact_root, &mut health, &writer, first_wall);
@@ -413,6 +464,8 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
     let mut last_process_mono: i64 = i64::MIN / 2;
     let mut last_discovery_mono: i64 = i64::MIN / 2;
     let mut last_prune_mono: i64 = i64::MIN / 2;
+    #[cfg(unix)]
+    let mut last_docker_log_mono: i64 = i64::MIN / 2;
     let mut cgroup_map: HashMap<String, String> = HashMap::new();
     let mut observed_tools: HashSet<String> = HashSet::new();
     let mut cycle: u64 = 0;
@@ -437,11 +490,20 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
             }));
         }
 
-        let sample_discovery = due(
+        let due_discovery = due(
             &mut last_discovery_mono,
             stamps.mono,
             options.config.general.discovery_secs,
         );
+        #[cfg(unix)]
+        poll_docker_events(
+            &mut enrichment,
+            &options.config,
+            &stamps,
+            &mut batch,
+            &mut health,
+        );
+        let sample_discovery = due_discovery || enrichment.force_discovery;
         let sample_cgroup = options.config.cgroup.enabled
             && due(
                 &mut last_cgroup_mono,
@@ -460,6 +522,7 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
             options.config.general.prune_interval_secs,
         );
         if sample_discovery {
+            enrichment.force_discovery = false;
             enrichment.last_cycle = cycle;
             enrich(
                 &mut enrichment,
@@ -567,7 +630,27 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
             &stamps,
             &mut health,
             &mut report,
+            "logs_file",
         );
+
+        #[cfg(unix)]
+        if options.config.logs.enabled
+            && due(
+                &mut last_docker_log_mono,
+                stamps.mono,
+                options.config.general.discovery_secs.max(5),
+            )
+        {
+            poll_docker_logs(
+                &mut enrichment,
+                &options.config,
+                &mut logs,
+                &stamps,
+                &mut batch,
+                &mut health,
+                &mut report,
+            );
+        }
 
         // Incidents from host and cgroup observations.
         let mut signals =
@@ -840,6 +923,7 @@ fn enqueue_logs(
     stamps: &Stamps,
     health: &mut HealthRegistry,
     report: &mut RunReport,
+    aggregate: &str,
 ) {
     for source in manager.health() {
         let id = format!("logs:{}", source.source_id);
@@ -875,10 +959,10 @@ fn enqueue_logs(
         batch.push(item);
         report.logs = report.logs.saturating_add(1);
     }
-    health.dropped("logs_file", pulse.dropped);
-    health.truncated("logs_file", pulse.truncated);
-    health.received("logs_file", pulse.received);
-    health.persisted("logs_file", pulse.records.len() as u64);
+    health.dropped(aggregate, pulse.dropped);
+    health.truncated(aggregate, pulse.truncated);
+    health.received(aggregate, pulse.received);
+    health.persisted(aggregate, pulse.records.len() as u64);
 }
 
 fn enqueue_incidents(
@@ -932,7 +1016,54 @@ fn enrich(
     health: &mut HealthRegistry,
 ) {
     if config.integrations.docker.should_attempt() {
-        let discovery = docker::discover();
+        #[cfg(unix)]
+        if enrichment.docker_api.is_none() {
+            match docker_api::DockerApi::connect_default() {
+                Ok(api) => {
+                    health.coverage(
+                        "docker_api",
+                        json!({
+                            "backend": "engine_api",
+                            "socket": api.socket(),
+                            "api_prefix": api.api_prefix(),
+                            "server_version": api.server_version(),
+                            "api_version": api.api_version(),
+                        }),
+                    );
+                    health.success("docker_api", stamps.wall);
+                    if enrichment.docker_event_ns == 0 {
+                        enrichment.docker_event_ns = stamps.wall.saturating_sub(60_000_000_000);
+                    }
+                    enrichment.docker_api = Some(api);
+                    enrichment.docker_api_error = None;
+                }
+                Err(err) => {
+                    enrichment.docker_api_error = Some(err.to_string());
+                    health.error("docker_api", stamps.wall, &err.to_string());
+                }
+            }
+        }
+        #[cfg(unix)]
+        let api_snapshot = enrichment.docker_api.clone();
+        #[cfg(unix)]
+        let api_result = api_snapshot.as_ref().map(docker_api::DockerApi::discover);
+        #[cfg(unix)]
+        let (backend, discovery) = match api_result {
+            Some(Ok(found)) => {
+                enrichment.docker_api_error = None;
+                health.success("docker_api", stamps.wall);
+                ("engine_api", found)
+            }
+            Some(Err(err)) => {
+                let message = err.to_string();
+                enrichment.docker_api_error = Some(message.clone());
+                health.error("docker_api", stamps.wall, &message);
+                ("cli", docker::discover())
+            }
+            None => ("cli", docker::discover()),
+        };
+        #[cfg(not(unix))]
+        let (backend, discovery) = ("cli", docker::discover());
         enrichment.containers = discovery
             .containers
             .iter()
@@ -943,12 +1074,98 @@ fn enrich(
             .iter()
             .map(|container| (container.short_id.clone(), container.name.clone()))
             .collect();
+        #[cfg(unix)]
+        {
+            let active: HashSet<&str> = enrichment
+                .containers
+                .values()
+                .map(|container| container.id.as_str())
+                .collect();
+            enrichment
+                .docker_log_cursors
+                .retain(|id, _| active.contains(id.as_str()));
+        }
         for container in &discovery.containers {
-            let labels = BTreeMap::from([
+            let mut labels = BTreeMap::from([
                 ("image".to_string(), container.image.clone()),
                 ("state".to_string(), container.state.clone()),
                 ("status".to_string(), container.status.clone()),
             ]);
+            if let Some(health) = &container.health {
+                labels.insert("health".to_string(), health.clone());
+            }
+            if let Some(driver) = &container.log_driver {
+                labels.insert("log_driver".to_string(), driver.clone());
+            }
+            if !container.log_options.is_empty() {
+                let options = container
+                    .log_options
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                labels.insert("log_options".to_string(), options);
+            }
+            if let Some(path) = &container.log_path {
+                labels.insert("log_path".to_string(), path.clone());
+            }
+            if let Some(policy) = &container.restart_policy {
+                labels.insert("restart_policy".to_string(), policy.clone());
+            }
+            if let Some(project) = container.labels.get("com.docker.compose.project") {
+                labels.insert("compose_project".to_string(), project.clone());
+            }
+            if let Some(service) = container.labels.get("com.docker.compose.service") {
+                labels.insert("compose_service".to_string(), service.clone());
+            }
+            if let Some(directory) = container.labels.get("com.docker.compose.working_dir") {
+                labels.insert("compose_working_dir".to_string(), directory.clone());
+            }
+            if let Some(files) = container.labels.get("com.docker.compose.config_files") {
+                labels.insert("compose_config_files".to_string(), files.clone());
+            }
+            if let Some(version) = container.labels.get("com.docker.compose.version") {
+                labels.insert("compose_version".to_string(), version.clone());
+            }
+            if !container.networks.is_empty() {
+                labels.insert("networks".to_string(), container.networks.join(","));
+            }
+            if !container.network_ips.is_empty() {
+                labels.insert("network_ips".to_string(), container.network_ips.join(","));
+            }
+            if !container.ports.is_empty() {
+                labels.insert("ports".to_string(), container.ports.join(","));
+            }
+            if !container.mounts.is_empty() {
+                labels.insert("mounts".to_string(), container.mounts.join(","));
+            }
+            if let Some(hostname) = &container.hostname {
+                labels.insert("hostname".to_string(), hostname.clone());
+            }
+            if let Some(user) = &container.user {
+                labels.insert("user".to_string(), user.clone());
+            }
+            if let Some(working_dir) = &container.working_dir {
+                labels.insert("working_dir".to_string(), working_dir.clone());
+            }
+            if container.restart_count > 0 {
+                labels.insert(
+                    "restart_count".to_string(),
+                    container.restart_count.to_string(),
+                );
+            }
+            if let Some(limit) = container.memory_limit {
+                labels.insert("memory_limit".to_string(), limit.to_string());
+            }
+            if let Some(limit) = container.nano_cpus {
+                labels.insert("nano_cpus".to_string(), limit.to_string());
+            }
+            if let Some(limit) = container.pids_limit {
+                labels.insert("pids_limit".to_string(), limit.to_string());
+            }
+            if container.pid > 0 {
+                labels.insert("pid".to_string(), container.pid.to_string());
+            }
             batch.push(WriteItem::normal(WriteRecord::Entity(Entity {
                 entity_id: format!("container:{}", container.short_id),
                 kind: EntityKind::Container,
@@ -961,26 +1178,56 @@ fn enrich(
             })));
         }
         let (detected, error) = if discovery.available {
-            (Availability::Available, None)
+            (Availability::Available, discovery.error.clone())
         } else {
             (Availability::Unavailable, discovery.error.clone())
         };
+        #[cfg(unix)]
+        let version = api_snapshot
+            .as_ref()
+            .and_then(|api| api.server_version().map(str::to_string));
+        #[cfg(not(unix))]
+        let version: Option<String> = None;
         batch.push(WriteItem::normal(WriteRecord::IntegrationState(
             integration_row(
                 "docker",
                 config.integrations.docker,
                 detected,
-                None,
+                version,
                 catalog,
                 error,
                 stamps.wall,
             ),
         )));
+        let container_count = discovery.containers.len() as u64;
         enrichment.docker = discovery;
         if detected == Availability::Available {
             health.success("docker", stamps.wall);
+            health.received("docker", container_count);
+            health.persisted("docker", container_count);
+            #[cfg(unix)]
+            let api_version = api_snapshot.as_ref().and_then(|api| api.api_version());
+            #[cfg(not(unix))]
+            let api_version: Option<&str> = None;
+            health.coverage(
+                "docker",
+                json!({
+                    "backend": backend,
+                    "containers": enrichment.containers.len(),
+                    "api_version": api_version,
+                }),
+            );
         } else {
-            health.unavailable("docker", "docker CLI/daemon unavailable");
+            health.unavailable("docker", "Docker Engine API and CLI are unavailable");
+            if !enrichment.docker_error_reported {
+                enrichment.docker_error_reported = true;
+                batch.push(WriteItem::normal(WriteRecord::Gap(CoverageGap {
+                    source_id: "docker".to_string(),
+                    kind: "permission_or_absent".to_string(),
+                    since_wall_ns: Some(stamps.wall),
+                    detail: "Docker metadata/logs unavailable; baseline process/cgroup accounting continues. Grant the service user read access to the Docker socket only if its root-equivalent privilege is acceptable.".to_string(),
+                })));
+            }
         }
     }
 
@@ -1092,6 +1339,222 @@ fn enrich(
         }
     }
 }
+
+#[cfg(unix)]
+fn poll_docker_events(
+    enrichment: &mut Enrichment,
+    config: &Config,
+    stamps: &Stamps,
+    batch: &mut Vec<WriteItem>,
+    health: &mut HealthRegistry,
+) {
+    if !config.integrations.docker.should_attempt() {
+        return;
+    }
+    let Some(api) = enrichment.docker_api.clone() else {
+        return;
+    };
+    let until = stamps.wall;
+    let previous = enrichment.docker_event_ns;
+    let since = Some(previous.max(1));
+    match api.events(since, until) {
+        Ok(events) => {
+            let mut newest = previous;
+            health.success("docker_api", stamps.wall);
+            health.received("docker_api", events.len() as u64);
+            health.persisted("docker_api", events.len() as u64);
+            for event in events {
+                if event.time_ns <= previous {
+                    continue;
+                }
+                newest = newest.max(event.time_ns);
+                let short: String = event.id.chars().take(12).collect();
+                let (kind, severity) = docker_event_kind(&event.action);
+                if matches!(
+                    kind,
+                    EventKind::ContainerStarted
+                        | EventKind::ContainerStopped
+                        | EventKind::ContainerWarning
+                ) {
+                    enrichment.force_discovery = true;
+                }
+                let mut payload = serde_json::Map::new();
+                for key in [
+                    "name",
+                    "image",
+                    "exitCode",
+                    "signal",
+                    "com.docker.compose.project",
+                    "com.docker.compose.service",
+                ] {
+                    if let Some(value) = event.attributes.get(key) {
+                        payload.insert(key.to_string(), serde_json::Value::from(value.clone()));
+                    }
+                }
+                payload.insert(
+                    "action".to_string(),
+                    serde_json::Value::from(event.action.clone()),
+                );
+                batch.push(WriteItem::normal(WriteRecord::Event(EventRecord {
+                    wall_ns: event.time_ns.max(1),
+                    mono_ns: Some(stamps.mono),
+                    entity_id: (!short.is_empty()).then(|| format!("container:{short}")),
+                    kind,
+                    severity,
+                    payload: serde_json::Value::Object(payload),
+                    provenance: "docker_engine_api".to_string(),
+                    lost_before: 0,
+                })));
+            }
+            enrichment.docker_event_ns = newest.max(until);
+        }
+        Err(err) => {
+            let message = err.to_string();
+            enrichment.docker_api_error = Some(message.clone());
+            health.error("docker_api", stamps.wall, &message);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn docker_event_kind(action: &str) -> (EventKind, Severity) {
+    if action.starts_with("health_status") {
+        if action.contains("unhealthy") {
+            return (EventKind::ContainerWarning, Severity::Warn);
+        }
+        return (EventKind::ServiceEvent, Severity::Info);
+    }
+    match action {
+        "start" | "restart" | "unpause" | "create" => (EventKind::ContainerStarted, Severity::Info),
+        "die" | "stop" | "kill" | "destroy" | "pause" => {
+            (EventKind::ContainerStopped, Severity::Info)
+        }
+        "oom" => (EventKind::ContainerWarning, Severity::Critical),
+        _ => (EventKind::ServiceEvent, Severity::Info),
+    }
+}
+
+#[cfg(unix)]
+fn poll_docker_logs(
+    enrichment: &mut Enrichment,
+    config: &Config,
+    logs: &mut LogManager,
+    stamps: &Stamps,
+    batch: &mut Vec<WriteItem>,
+    health: &mut HealthRegistry,
+    report: &mut RunReport,
+) {
+    if !config.integrations.docker.should_attempt() {
+        return;
+    }
+    let Some(api) = enrichment.docker_api.clone() else {
+        return;
+    };
+    let containers: Vec<ContainerInfo> = enrichment.containers.values().cloned().collect();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for container in containers {
+        if Instant::now() >= deadline {
+            health.error(
+                "docker_logs",
+                stamps.wall,
+                "Docker log poll exceeded its 10s budget",
+            );
+            break;
+        }
+        let driver = container.log_driver.as_deref().unwrap_or("json-file");
+        if driver == "none" {
+            continue;
+        }
+        let source_name = if container.name.trim().is_empty() {
+            container.short_id.clone()
+        } else {
+            container
+                .name
+                .chars()
+                .take(48)
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        let source_id = format!("docker:{source_name}");
+        if !logs.source_exists(&source_id) && !logs.has_source_capacity() {
+            health.dropped("docker_logs", 1);
+            continue;
+        }
+        let cursor = enrichment.docker_log_cursors.get(&container.id).copied();
+        if cursor.is_some() && container.state != "running" {
+            // A stopped/paused container cannot append logs; its existing evidence is
+            // already in the ring/SQLite. Poll again only if it starts.
+            continue;
+        }
+        match api.logs(
+            &container.id,
+            cursor,
+            DOCKER_LOG_TAIL,
+            DOCKER_LOG_BYTES,
+            container.tty,
+        ) {
+            Ok(log_batch) => {
+                health.success("docker_logs", stamps.wall);
+                let mut lines = Vec::with_capacity(log_batch.lines.len());
+                for line in log_batch.lines {
+                    if line
+                        .timestamp_ns
+                        .zip(cursor)
+                        .is_some_and(|(timestamp, cursor)| timestamp <= cursor)
+                    {
+                        continue;
+                    }
+                    if line.text.is_empty() {
+                        continue;
+                    }
+                    lines.push(ExternalLogLine {
+                        wall_ns: line.timestamp_ns,
+                        stream: line.stream,
+                        text: line.text,
+                        truncated: line.truncated,
+                    });
+                }
+                if log_batch.truncated {
+                    health.truncated("docker_logs", 1);
+                }
+                if let Some(cursor) = log_batch.next_cursor {
+                    enrichment
+                        .docker_log_cursors
+                        .insert(container.id.clone(), cursor);
+                }
+                let descriptor = ExternalSource {
+                    source_id,
+                    kind: "docker".to_string(),
+                    target: container.name.clone(),
+                    entity_hint: Some(container.name.clone()),
+                    entity_id: Some(format!("container:{}", container.short_id)),
+                };
+                let pulse = logs.ingest_external(&descriptor, lines, stamps);
+                enqueue_logs(batch, &pulse, logs, stamps, health, report, "docker_logs");
+            }
+            Err(err) => {
+                health.error("docker_logs", stamps.wall, &err.to_string());
+            }
+        }
+    }
+    // Dynamic Docker sources are visible in the report's log-source ledger too.
+    for (id, kind, target, hint, max_lines, max_bytes) in logs.descriptors() {
+        batch.push(WriteItem::normal(WriteRecord::LogSource(LogSourceRow {
+            source_id: id,
+            kind,
+            target,
+            entity_hint: hint,
+            max_lines: Some(max_lines),
+            max_bytes: Some(max_bytes),
+        })));
+    }
+}
+
+#[cfg(unix)]
+const DOCKER_LOG_BYTES: usize = 256 * 1024;
+#[cfg(unix)]
+const DOCKER_LOG_TAIL: usize = 500;
 
 fn integration_row(
     id: &str,

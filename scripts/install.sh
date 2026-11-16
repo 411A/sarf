@@ -15,6 +15,7 @@
 #   --user NAME       Service user and group (default: sarf)
 #   --no-systemd      Do not install or reload the systemd unit
 #   --start           Enable and start the unit now (requires systemd)
+#   --docker-group    Add the service user to the docker group (root-equivalent)
 #   -h, --help        Show this help
 #
 # The installer is idempotent. It never downloads anything, never starts the
@@ -44,6 +45,7 @@ RUN_GROUP=sarf
 BINARY="$REPO_ROOT/target/release/sarf"
 INSTALL_SYSTEMD=1
 START=0
+JOIN_DOCKER_GROUP=0
 
 usage() {
     cat <<'EOF'
@@ -58,6 +60,7 @@ Options:
   --user NAME       Service user and group (default: sarf)
   --no-systemd      Do not install or reload the systemd unit
   --start           Enable and start the unit now (requires systemd)
+  --docker-group    Add the service user to the docker group (root-equivalent)
   -h, --help        Show this help
 
 Run as root. The service is not started unless --start is passed.
@@ -194,6 +197,15 @@ if [ "$START" -eq 1 ] && [ "$INSTALL_SYSTEMD" -eq 0 ]; then
     die "--start cannot be combined with --no-systemd"
 fi
 
+if [ "$JOIN_DOCKER_GROUP" -eq 1 ]; then
+    command -v usermod >/dev/null 2>&1 || die "usermod is required for --docker-group"
+    if command -v getent >/dev/null 2>&1; then
+        getent group docker >/dev/null 2>&1 || die "--docker-group requested but the docker group does not exist"
+    else
+        grep -q "^docker:" /etc/group 2>/dev/null || die "--docker-group requested but the docker group does not exist"
+    fi
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
     die "this is a system-wide install; run it as root"
 fi
@@ -295,6 +307,12 @@ chown -R "$RUN_USER:$RUN_GROUP" "$DATA_DIR"
 chmod 0750 "$DATA_DIR"
 note "Configuration: $DATA_DIR/sarf.toml"
 
+if [ "$JOIN_DOCKER_GROUP" -eq 1 ]; then
+    usermod -aG docker "$RUN_USER"
+    note "Added $RUN_USER to the docker group."
+    note "WARNING: docker group membership is root-equivalent. Remove it if full Docker metadata/logs are not required."
+fi
+
 # --- systemd ---------------------------------------------------------------
 
 UNIT_INSTALLED=0
@@ -355,6 +373,13 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ]; then
             chmod 0644 "$unit_tmp"
             mv -f "$unit_tmp" "$UNIT_DEST"
             trap - 0 1 2 15
+        fi
+
+        if [ "$JOIN_DOCKER_GROUP" -eq 1 ]; then
+            # Docker socket access is root-equivalent; this is opt-in only.
+            if ! grep -q '^SupplementaryGroups=docker$' "$UNIT_DEST"; then
+                sed -i '/^Group=/a SupplementaryGroups=docker' "$UNIT_DEST"
+            fi
         fi
 
         UNIT_INSTALLED=1

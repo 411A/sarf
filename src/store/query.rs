@@ -434,6 +434,50 @@ pub fn host_mem_total(conn: &Connection, window: Window) -> Result<Option<u64>> 
     Ok(value.map(|value| value.max(0) as u64))
 }
 
+/// One Docker container entity row for reports and exports.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ContainerRow {
+    /// Entity id.
+    pub entity_id: String,
+    /// Container name.
+    pub name: String,
+    /// Bounded labels (image, state, log driver, Compose, ports, mounts, ...).
+    pub labels: BTreeMap<String, String>,
+    /// First observation.
+    pub first_seen_wall_ns: i64,
+    /// Last observation.
+    pub last_seen_wall_ns: i64,
+}
+
+/// Container entities, newest activity first, bounded.
+pub fn containers(conn: &Connection, limit: usize) -> Result<Vec<ContainerRow>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT entity_id, name, labels_json, first_seen_wall_ns, last_seen_wall_ns
+               FROM entities WHERE kind = 'container'
+              ORDER BY last_seen_wall_ns DESC LIMIT ?1",
+        )
+        .map_err(db_err)?;
+    let mut rows = statement
+        .query(params![limit.clamp(1, 1000) as i64])
+        .map_err(db_err)?;
+    let mut containers = Vec::new();
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let labels_json: Option<String> = row.get(2).map_err(db_err)?;
+        let labels = labels_json
+            .and_then(|text| serde_json::from_str::<BTreeMap<String, String>>(&text).ok())
+            .unwrap_or_default();
+        containers.push(ContainerRow {
+            entity_id: row.get(0).map_err(db_err)?,
+            name: row.get(1).map_err(db_err)?,
+            labels,
+            first_seen_wall_ns: row.get(3).map_err(db_err)?,
+            last_seen_wall_ns: row.get(4).map_err(db_err)?,
+        });
+    }
+    Ok(containers)
+}
+
 /// Database summary for `sarf status`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DbStats {

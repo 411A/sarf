@@ -73,6 +73,7 @@ fn report_template_has_all_required_views_and_offline_csp() {
         "id=\"panel-timeline\"",
         "id=\"panel-top\"",
         "id=\"panel-processes\"",
+        "id=\"panel-containers\"",
         "id=\"panel-incidents\"",
         "id=\"panel-logs\"",
         "id=\"panel-coverage\"",
@@ -96,6 +97,7 @@ fn report_template_has_all_required_views_and_offline_csp() {
     }
     assert!(script.contains("createTextNode") || script.contains("textContent"));
     assert!(script.contains("Association confidence"));
+    assert!(script.contains("renderContainers"));
     assert!(script.contains("Unavailable"));
 }
 
@@ -150,6 +152,7 @@ fn release_and_operations_artifacts_exist() {
         "README.md",
         "LICENSE",
         "docs/DECISIONS.md",
+        "docs/DOCKER.md",
         "docs/TESTING.md",
         "docs/SPEC-TRACEABILITY.md",
         "deploy/sarf.service",

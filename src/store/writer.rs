@@ -1,6 +1,6 @@
 //! Bounded single-writer thread (guide §11.1 and §19 degradation policy).
 //!
-//! The daemon never touches SQLite on its sampling thread. Collectors submit
+//! The daemon never touches `SQLite` on its sampling thread. Collectors submit
 //! [`WriteItem`]s to a bounded channel; one thread batches them into transactions.
 //! When the queue is full, low-priority records are dropped first and every drop is
 //! counted, so reports can say evidence was lost instead of silently losing it.

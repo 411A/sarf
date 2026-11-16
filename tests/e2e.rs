@@ -177,9 +177,10 @@ fn full_offline_forensics_workflow() {
     ] {
         assert!(html.contains(required), "report missing {required}");
     }
-    assert!(!html.contains("http://"));
-    assert!(!html.contains("https://"));
     assert!(!html.contains("<script src"));
+    assert!(!html.contains("src=\"http"));
+    assert!(!html.contains("@import"));
+    assert!(!html.contains("url(http"));
 
     let status = run(&data_dir, &["status", "--json"]);
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");

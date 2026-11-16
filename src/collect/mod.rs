@@ -204,6 +204,8 @@ impl HealthRegistry {
             ("logs_file", ConfiguredState::Auto),
             ("logs_docker", ConfiguredState::Auto),
             ("docker", ConfiguredState::Auto),
+            ("docker_api", ConfiguredState::Auto),
+            ("docker_logs", ConfiguredState::Auto),
             ("tmux", ConfiguredState::Auto),
             ("zellij", ConfiguredState::Auto),
             ("nginx", ConfiguredState::Auto),

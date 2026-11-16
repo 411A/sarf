@@ -6,6 +6,8 @@
 //! stop universal process accounting (`docs/DECISIONS.md`).
 
 pub mod docker;
+#[cfg(unix)]
+pub mod docker_api;
 pub mod sessions;
 
 use std::process::{Command, Stdio};

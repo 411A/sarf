@@ -1,9 +1,8 @@
-//! Docker container metadata via a bounded CLI query (v0.1 fallback).
+//! Docker container metadata and logs via the Engine API, with a bounded CLI
+//! fallback.
 //!
-//! The Docker Engine API (`bollard`) is the documented upgrade path. This adapter is
-//! enrichment only: container accounting still comes from cgroup v2 and `/proc`.
-//! `docker ps` is queried at the discovery cadence, never per sampling cycle, with a
-//! timeout and output cap.
+//! Container resource accounting still comes from cgroup v2 and `/proc`; this adapter
+//! only enriches lifecycle, metadata and logs.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -17,7 +16,7 @@ pub const DOCKER_TIMEOUT: Duration = Duration::from_secs(3);
 /// Maximum containers retained from one discovery pass.
 pub const MAX_CONTAINERS: usize = 1000;
 
-/// One container from `docker ps --format {{json .}}`.
+/// One container from the Docker Engine API or the CLI fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerInfo {
     /// Full container id.
@@ -32,8 +31,52 @@ pub struct ContainerInfo {
     pub state: String,
     /// Human status (`Up 2 hours`, ...).
     pub status: String,
+    /// Health status when a healthcheck exists (`healthy`, `unhealthy`, `starting`).
+    pub health: Option<String>,
     /// Bounded labels (never environment variables).
     pub labels: BTreeMap<String, String>,
+    /// Configured log driver (`json-file`, `journald`, `none`, ...).
+    pub log_driver: Option<String>,
+    /// Configured log options such as `max-size`/`max-file`.
+    pub log_options: BTreeMap<String, String>,
+    /// Docker-managed log path when the driver exposes one.
+    pub log_path: Option<String>,
+    /// Whether the container allocates a TTY (changes the logs framing).
+    pub tty: bool,
+    /// Restart policy (`no`, `always`, `unless-stopped`, `on-failure`).
+    pub restart_policy: Option<String>,
+    /// Configured cgroup parent (usually empty with the systemd driver).
+    pub cgroup_parent: Option<String>,
+    /// Main container PID (0 when stopped).
+    pub pid: u32,
+    /// Creation timestamp as reported by Docker.
+    pub created: Option<String>,
+    /// Last start timestamp.
+    pub started_at: Option<String>,
+    /// Last finish timestamp.
+    pub finished_at: Option<String>,
+    /// Connected network names.
+    pub networks: Vec<String>,
+    /// Published ports (`[ip:]public->private/proto`), bounded.
+    pub ports: Vec<String>,
+    /// Mounts (`type:source->destination`), bounded.
+    pub mounts: Vec<String>,
+    /// Container hostname.
+    pub hostname: Option<String>,
+    /// Configured user.
+    pub user: Option<String>,
+    /// Working directory.
+    pub working_dir: Option<String>,
+    /// Docker restart count.
+    pub restart_count: u32,
+    /// Memory limit in bytes, when set.
+    pub memory_limit: Option<u64>,
+    /// Nano CPUs limit, when set.
+    pub nano_cpus: Option<i64>,
+    /// PIDs limit, when set.
+    pub pids_limit: Option<i64>,
+    /// Per-network IP addresses (`network=ip`), bounded.
+    pub network_ips: Vec<String>,
 }
 
 impl ContainerInfo {
@@ -133,7 +176,32 @@ pub fn parse_ps_output(text: &str) -> Vec<ContainerInfo> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            health: None,
             labels: parse_labels(value.get("Labels").and_then(Value::as_str).unwrap_or("")),
+            log_driver: None,
+            log_options: BTreeMap::new(),
+            log_path: None,
+            tty: false,
+            restart_policy: None,
+            cgroup_parent: None,
+            pid: 0,
+            created: value
+                .get("CreatedAt")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            started_at: None,
+            finished_at: None,
+            networks: Vec::new(),
+            ports: Vec::new(),
+            mounts: Vec::new(),
+            hostname: None,
+            user: None,
+            working_dir: None,
+            restart_count: 0,
+            memory_limit: None,
+            nano_cpus: None,
+            pids_limit: None,
+            network_ips: Vec::new(),
         });
     }
     containers
@@ -146,7 +214,7 @@ fn parse_labels(text: &str) -> BTreeMap<String, String> {
             continue;
         };
         let key = key.trim();
-        if key.is_empty() || labels.len() >= 64 {
+        if key.is_empty() || labels.len() >= 64 || sensitive_label(key) {
             continue;
         }
         let (value, _) = crate::store::truncate_utf8(value.trim(), 256);
@@ -154,6 +222,21 @@ fn parse_labels(text: &str) -> BTreeMap<String, String> {
         labels.insert(key, value);
     }
     labels
+}
+
+pub(crate) fn sensitive_label(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "token",
+        "secret",
+        "api_key",
+        "apikey",
+        "access_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 #[cfg(test)]
@@ -184,6 +267,28 @@ mod tests {
     fn skips_malformed_and_non_container_lines() {
         let output = "not json\n{\"ID\":\"short\"}\n{\"ID\":\"zzzzzzzzzzzz\"}\n";
         assert!(parse_ps_output(output).is_empty());
+    }
+
+    #[test]
+    fn sensitive_labels_are_not_retained() {
+        let line = r#"{"ID":"abcdef0123456789abcdef0123456789","Names":"x","Labels":"password=hunter2,com.docker.compose.project=shop,api_key=abc"}"#;
+        let containers = parse_ps_output(line);
+        assert_eq!(containers.len(), 1);
+        assert!(!containers[0]
+            .labels
+            .keys()
+            .any(|key| key.contains("password")));
+        assert!(!containers[0]
+            .labels
+            .keys()
+            .any(|key| key.contains("api_key")));
+        assert_eq!(
+            containers[0]
+                .labels
+                .get("com.docker.compose.project")
+                .map(String::as_str),
+            Some("shop")
+        );
     }
 
     #[test]

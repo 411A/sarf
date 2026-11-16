@@ -1,9 +1,9 @@
-//! SQLite storage: schema, single-writer batches and query helpers.
+//! `SQLite` storage: schema, single-writer batches and query helpers.
 //!
 //! One `Store` owns one connection. In production that connection lives on a single
 //! writer thread ([`writer::Writer`]); CLI commands open their own read connection.
 //! Writes always go through one transaction per batch so the daemon never issues
-//! synchronous SQLite work on its sampling thread.
+//! synchronous `SQLite` work on its sampling thread.
 
 pub mod query;
 pub mod retention;
@@ -20,16 +20,16 @@ use crate::model::{
     LogRecord, ProcessSample, Relationship, WritePriority,
 };
 
-/// Convert a `u64` counter into a SQLite INTEGER.
+/// Convert a `u64` counter into a `SQLite` INTEGER.
 ///
 /// `rusqlite` deliberately does not implement `ToSql`/`FromSql` for `u64` because
-/// SQLite integers are signed. Kernel counters never approach `i64::MAX`; we
+/// `SQLite` integers are signed. Kernel counters never approach `i64::MAX`; we
 /// saturate instead of wrapping so a corrupt counter cannot become a negative value.
 pub fn to_sql_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
 
-/// Convert an optional `u64` into a SQLite INTEGER or NULL.
+/// Convert an optional `u64` into a `SQLite` INTEGER or NULL.
 pub fn to_sql_opt_i64(value: Option<u64>) -> Option<i64> {
     value.map(to_sql_i64)
 }
@@ -61,7 +61,7 @@ impl RowRead for rusqlite::Row<'_> {
     }
 }
 
-/// SQLite connection wrapper used by the writer thread and by tests.
+/// `SQLite` connection wrapper used by the writer thread and by tests.
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
@@ -270,7 +270,7 @@ pub const MAX_EVIDENCE_JSON_BYTES: usize = 64 * 1024;
 /// Maximum bytes stored for one log message in the database.
 pub const MAX_LOG_STORED_BYTES: usize = 16 * 1024;
 /// Maximum bytes stored in entity labels JSON.
-pub const MAX_LABELS_JSON_BYTES: usize = 2 * 1024;
+pub const MAX_LABELS_JSON_BYTES: usize = 32 * 1024;
 
 impl Store {
     /// Open (or create) the database at `path`, apply pragmas and migrations.
@@ -320,7 +320,7 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
         )
         .map_err(|err| Error::Storage(format!("cannot open {}: {err}", path.display())))?;
-        let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let _ = conn.pragma_update(None, "query_only", true);
         Ok(Self {
             conn,
