@@ -42,37 +42,37 @@ impl EntityKind {
     /// Stable database string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            EntityKind::Host => "host",
-            EntityKind::Cgroup => "cgroup",
-            EntityKind::SystemdUnit => "systemd_unit",
-            EntityKind::Container => "container",
-            EntityKind::Process => "process",
-            EntityKind::Session => "session",
-            EntityKind::Tool => "tool",
-            EntityKind::LogSource => "log_source",
-            EntityKind::NetworkInterface => "interface",
+            Self::Host => "host",
+            Self::Cgroup => "cgroup",
+            Self::SystemdUnit => "systemd_unit",
+            Self::Container => "container",
+            Self::Process => "process",
+            Self::Session => "session",
+            Self::Tool => "tool",
+            Self::LogSource => "log_source",
+            Self::NetworkInterface => "interface",
         }
     }
 
     /// Parse a database string, returning `None` for unknown kinds.
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
-            "host" => EntityKind::Host,
-            "cgroup" => EntityKind::Cgroup,
-            "systemd_unit" => EntityKind::SystemdUnit,
-            "container" => EntityKind::Container,
-            "process" => EntityKind::Process,
-            "session" => EntityKind::Session,
-            "tool" => EntityKind::Tool,
-            "log_source" => EntityKind::LogSource,
-            "interface" => EntityKind::NetworkInterface,
+            "host" => Self::Host,
+            "cgroup" => Self::Cgroup,
+            "systemd_unit" => Self::SystemdUnit,
+            "container" => Self::Container,
+            "process" => Self::Process,
+            "session" => Self::Session,
+            "tool" => Self::Tool,
+            "log_source" => Self::LogSource,
+            "interface" => Self::NetworkInterface,
             _ => return None,
         })
     }
 }
 
 /// A durable entity row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entity {
     /// Primary key, kind-prefixed and stable across observations.
     pub entity_id: EntityId,
@@ -118,14 +118,14 @@ impl RelationKind {
     /// Stable database string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            RelationKind::SpawnedBy => "SPAWNED_BY",
-            RelationKind::MemberOfCgroup => "MEMBER_OF_CGROUP",
-            RelationKind::ManagedBySystemd => "MANAGED_BY_SYSTEMD",
-            RelationKind::RunningInContainer => "RUNNING_IN_CONTAINER",
-            RelationKind::AttachedToSession => "ATTACHED_TO_SESSION",
-            RelationKind::EmittedLog => "EMITTED_LOG",
-            RelationKind::ObservedBy => "OBSERVED_BY",
-            RelationKind::LogsFor => "LOGS_FOR",
+            Self::SpawnedBy => "SPAWNED_BY",
+            Self::MemberOfCgroup => "MEMBER_OF_CGROUP",
+            Self::ManagedBySystemd => "MANAGED_BY_SYSTEMD",
+            Self::RunningInContainer => "RUNNING_IN_CONTAINER",
+            Self::AttachedToSession => "ATTACHED_TO_SESSION",
+            Self::EmittedLog => "EMITTED_LOG",
+            Self::ObservedBy => "OBSERVED_BY",
+            Self::LogsFor => "LOGS_FOR",
         }
     }
 }
@@ -163,7 +163,7 @@ pub struct ProcessIdentity {
 impl ProcessIdentity {
     /// Build an identity from its parts.
     pub fn new(boot: impl Into<String>, pid: u32, start_ticks: u64) -> Self {
-        ProcessIdentity {
+        Self {
             boot: boot.into(),
             pid,
             start_ticks,
@@ -200,7 +200,7 @@ impl CgroupIdentity {
     }
 }
 
-/// CPU time categories from `/proc/stat` (ticks, USER_HZ).
+/// CPU time categories from `/proc/stat` (ticks, `USER_HZ`).
 ///
 /// `guest` and `guest_nice` are already included in `user`/`nice`; they are kept
 /// for completeness but excluded from [`CpuTimes::total`] to avoid double counting.
@@ -224,13 +224,13 @@ pub struct CpuTimes {
     pub steal: u64,
     /// guest (already in user)
     pub guest: u64,
-    /// guest_nice (already in nice)
+    /// `guest_nice` (already in nice)
     pub guest_nice: u64,
 }
 
 impl CpuTimes {
     /// Sum of all first-level counters, excluding guest time (accounted upstream).
-    pub fn total(self) -> u64 {
+    pub const fn total(self) -> u64 {
         self.user
             .saturating_add(self.nice)
             .saturating_add(self.system)
@@ -242,7 +242,7 @@ impl CpuTimes {
     }
 
     /// Non-idle time (still includes iowait, which is a stall rather than work).
-    pub fn busy(self) -> u64 {
+    pub const fn busy(self) -> u64 {
         self.total()
             .saturating_sub(self.idle)
             .saturating_sub(self.iowait)
@@ -253,9 +253,9 @@ impl CpuTimes {
     /// Returns `None` for any field that decreased (counter reset, host reboot,
     /// 32-bit wrap on old kernels). The caller records a counter anomaly rather
     /// than inventing a negative delta or a huge spike.
-    pub fn delta(self, previous: CpuTimes) -> Option<CpuTimes> {
+    pub fn delta(self, previous: Self) -> Option<Self> {
         let sub = |now: u64, before: u64| now.checked_sub(before);
-        Some(CpuTimes {
+        Some(Self {
             user: sub(self.user, previous.user)?,
             nice: sub(self.nice, previous.nice)?,
             system: sub(self.system, previous.system)?,
@@ -273,19 +273,19 @@ impl CpuTimes {
 /// Memory snapshot from `/proc/meminfo`, in bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemSnapshot {
-    /// MemTotal
+    /// `MemTotal`
     pub total: u64,
-    /// MemFree
+    /// `MemFree`
     pub free: Option<u64>,
-    /// MemAvailable (preferred for "used" arithmetic)
+    /// `MemAvailable` (preferred for "used" arithmetic)
     pub available: Option<u64>,
     /// Buffers
     pub buffers: Option<u64>,
-    /// Cached (includes SReclaimable? kept as reported)
+    /// Cached (includes `SReclaimable`? kept as reported)
     pub cached: Option<u64>,
-    /// SwapTotal
+    /// `SwapTotal`
     pub swap_total: Option<u64>,
-    /// SwapFree
+    /// `SwapFree`
     pub swap_free: Option<u64>,
 }
 
@@ -514,7 +514,7 @@ pub struct CgroupRef {
 }
 
 /// Universe of per-process facts collected in one cycle.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessObservation {
     /// Stable identity.
     pub identity: ProcessIdentity,
@@ -633,24 +633,24 @@ impl ToolCategory {
     /// Stable string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            ToolCategory::ContainerRuntime => "container_runtime",
-            ToolCategory::WebServer => "web_server",
-            ToolCategory::Tunnel => "tunnel",
-            ToolCategory::SessionManager => "session_manager",
-            ToolCategory::ServiceManager => "service_manager",
-            ToolCategory::Scheduler => "scheduler",
-            ToolCategory::BuildTool => "build_tool",
-            ToolCategory::NetworkTool => "network_tool",
-            ToolCategory::CloudCli => "cloud_cli",
-            ToolCategory::TextTool => "text_tool",
-            ToolCategory::Monitor => "monitor",
-            ToolCategory::Other => "other",
+            Self::ContainerRuntime => "container_runtime",
+            Self::WebServer => "web_server",
+            Self::Tunnel => "tunnel",
+            Self::SessionManager => "session_manager",
+            Self::ServiceManager => "service_manager",
+            Self::Scheduler => "scheduler",
+            Self::BuildTool => "build_tool",
+            Self::NetworkTool => "network_tool",
+            Self::CloudCli => "cloud_cli",
+            Self::TextTool => "text_tool",
+            Self::Monitor => "monitor",
+            Self::Other => "other",
         }
     }
 }
 
 /// Declarative integration descriptor loaded from `config/integrations/*.toml`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ToolSpec {
     /// Stable integration id (`docker`, `nginx`, `cloudflared`, `tmux`, `zellij`, ...).
     pub id: String,
@@ -679,7 +679,7 @@ pub struct ToolSpec {
 }
 
 /// A role rule for a recognized tool: match and label.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ToolRole {
     /// Label shown in reports.
     pub label: String,
@@ -754,23 +754,23 @@ impl Severity {
     /// Stable database string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Severity::Debug => "debug",
-            Severity::Info => "info",
-            Severity::Warn => "warn",
-            Severity::Error => "error",
-            Severity::Critical => "critical",
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
+            Self::Critical => "critical",
         }
     }
 
     /// Parse a database or log-level string, case-insensitively.
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_uppercase().as_str() {
-            "DEBUG" | "TRACE" | "DBG" => Some(Severity::Debug),
-            "INFO" | "NOTICE" | "INF" => Some(Severity::Info),
-            "WARN" | "WARNING" | "WRN" => Some(Severity::Warn),
-            "ERROR" | "ERR" => Some(Severity::Error),
+            "DEBUG" | "TRACE" | "DBG" => Some(Self::Debug),
+            "INFO" | "NOTICE" | "INF" => Some(Self::Info),
+            "WARN" | "WARNING" | "WRN" => Some(Self::Warn),
+            "ERROR" | "ERR" => Some(Self::Error),
             "FATAL" | "CRIT" | "CRITICAL" | "PANIC" | "ALERT" | "EMERG" | "FTL" => {
-                Some(Severity::Critical)
+                Some(Self::Critical)
             }
             _ => None,
         }
@@ -797,17 +797,17 @@ impl LogStream {
     /// Stable string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            LogStream::Stdout => "stdout",
-            LogStream::Stderr => "stderr",
-            LogStream::File => "file",
-            LogStream::Journal => "journal",
-            LogStream::App => "app",
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::File => "file",
+            Self::Journal => "journal",
+            Self::App => "app",
         }
     }
 }
 
 /// One normalized, bounded log record.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogRecord {
     /// Wall clock of the source or of ingestion.
     pub wall_ns: i64,
@@ -867,45 +867,45 @@ impl EventKind {
     /// Stable string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            EventKind::ProcessStarted => "process_started",
-            EventKind::ProcessExited => "process_exited",
-            EventKind::ProcessExec => "process_exec",
-            EventKind::ContainerStarted => "container_started",
-            EventKind::ContainerStopped => "container_stopped",
-            EventKind::ContainerWarning => "container_warning",
-            EventKind::ServiceEvent => "service_event",
-            EventKind::IncidentOpened => "incident_opened",
-            EventKind::IncidentClosed => "incident_closed",
-            EventKind::LogFlood => "log_flood",
-            EventKind::CollectGap => "collect_gap",
-            EventKind::IntegrationDegraded => "integration_degraded",
-            EventKind::ThresholdCrossed => "threshold_crossed",
+            Self::ProcessStarted => "process_started",
+            Self::ProcessExited => "process_exited",
+            Self::ProcessExec => "process_exec",
+            Self::ContainerStarted => "container_started",
+            Self::ContainerStopped => "container_stopped",
+            Self::ContainerWarning => "container_warning",
+            Self::ServiceEvent => "service_event",
+            Self::IncidentOpened => "incident_opened",
+            Self::IncidentClosed => "incident_closed",
+            Self::LogFlood => "log_flood",
+            Self::CollectGap => "collect_gap",
+            Self::IntegrationDegraded => "integration_degraded",
+            Self::ThresholdCrossed => "threshold_crossed",
         }
     }
 
     /// Parse a database string.
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
-            "process_started" => EventKind::ProcessStarted,
-            "process_exited" => EventKind::ProcessExited,
-            "process_exec" => EventKind::ProcessExec,
-            "container_started" => EventKind::ContainerStarted,
-            "container_stopped" => EventKind::ContainerStopped,
-            "container_warning" => EventKind::ContainerWarning,
-            "service_event" => EventKind::ServiceEvent,
-            "incident_opened" => EventKind::IncidentOpened,
-            "incident_closed" => EventKind::IncidentClosed,
-            "log_flood" => EventKind::LogFlood,
-            "collect_gap" => EventKind::CollectGap,
-            "integration_degraded" => EventKind::IntegrationDegraded,
-            "threshold_crossed" => EventKind::ThresholdCrossed,
+            "process_started" => Self::ProcessStarted,
+            "process_exited" => Self::ProcessExited,
+            "process_exec" => Self::ProcessExec,
+            "container_started" => Self::ContainerStarted,
+            "container_stopped" => Self::ContainerStopped,
+            "container_warning" => Self::ContainerWarning,
+            "service_event" => Self::ServiceEvent,
+            "incident_opened" => Self::IncidentOpened,
+            "incident_closed" => Self::IncidentClosed,
+            "log_flood" => Self::LogFlood,
+            "collect_gap" => Self::CollectGap,
+            "integration_degraded" => Self::IntegrationDegraded,
+            "threshold_crossed" => Self::ThresholdCrossed,
             _ => return None,
         })
     }
 }
 
 /// One event row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRecord {
     /// Wall clock.
     pub wall_ns: i64,
@@ -955,32 +955,32 @@ impl Metric {
     /// Stable string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Metric::Cpu => "cpu",
-            Metric::Memory => "memory",
-            Metric::IoRead => "io_read",
-            Metric::IoWrite => "io_write",
-            Metric::NetRx => "net_rx",
-            Metric::NetTx => "net_tx",
-            Metric::PsiCpu => "psi_cpu",
-            Metric::PsiMemory => "psi_memory",
-            Metric::PsiIo => "psi_io",
-            Metric::Load => "load",
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::IoRead => "io_read",
+            Self::IoWrite => "io_write",
+            Self::NetRx => "net_rx",
+            Self::NetTx => "net_tx",
+            Self::PsiCpu => "psi_cpu",
+            Self::PsiMemory => "psi_memory",
+            Self::PsiIo => "psi_io",
+            Self::Load => "load",
         }
     }
 
     /// Parse a database string.
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
-            "cpu" => Metric::Cpu,
-            "memory" => Metric::Memory,
-            "io_read" => Metric::IoRead,
-            "io_write" => Metric::IoWrite,
-            "net_rx" => Metric::NetRx,
-            "net_tx" => Metric::NetTx,
-            "psi_cpu" => Metric::PsiCpu,
-            "psi_memory" => Metric::PsiMemory,
-            "psi_io" => Metric::PsiIo,
-            "load" => Metric::Load,
+            "cpu" => Self::Cpu,
+            "memory" => Self::Memory,
+            "io_read" => Self::IoRead,
+            "io_write" => Self::IoWrite,
+            "net_rx" => Self::NetRx,
+            "net_tx" => Self::NetTx,
+            "psi_cpu" => Self::PsiCpu,
+            "psi_memory" => Self::PsiMemory,
+            "psi_io" => Self::PsiIo,
+            "load" => Self::Load,
             _ => return None,
         })
     }
@@ -988,10 +988,10 @@ impl Metric {
     /// Unit label used in reports.
     pub const fn unit(self) -> &'static str {
         match self {
-            Metric::Cpu | Metric::PsiCpu | Metric::PsiMemory | Metric::PsiIo => "%",
-            Metric::Memory => "bytes",
-            Metric::IoRead | Metric::IoWrite | Metric::NetRx | Metric::NetTx => "bytes/s",
-            Metric::Load => "load",
+            Self::Cpu | Self::PsiCpu | Self::PsiMemory | Self::PsiIo => "%",
+            Self::Memory => "bytes",
+            Self::IoRead | Self::IoWrite | Self::NetRx | Self::NetTx => "bytes/s",
+            Self::Load => "load",
         }
     }
 }
@@ -1101,20 +1101,20 @@ impl Availability {
     /// Stable string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Availability::Available => "available",
-            Availability::Unavailable => "unavailable",
-            Availability::Partial => "partial",
-            Availability::Unknown => "unknown",
+            Self::Available => "available",
+            Self::Unavailable => "unavailable",
+            Self::Partial => "partial",
+            Self::Unknown => "unknown",
         }
     }
 
     /// Parse a database string.
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
-            "available" => Availability::Available,
-            "unavailable" => Availability::Unavailable,
-            "partial" => Availability::Partial,
-            "unknown" => Availability::Unknown,
+            "available" => Self::Available,
+            "unavailable" => Self::Unavailable,
+            "partial" => Self::Partial,
+            "unknown" => Self::Unknown,
             _ => return None,
         })
     }
@@ -1136,9 +1136,9 @@ impl ConfiguredState {
     /// Stable string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            ConfiguredState::Enabled => "enabled",
-            ConfiguredState::Disabled => "disabled",
-            ConfiguredState::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Auto => "auto",
         }
     }
 }
@@ -1161,16 +1161,16 @@ impl PermissionState {
     /// Stable string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            PermissionState::Permitted => "permitted",
-            PermissionState::Denied => "denied",
-            PermissionState::Partial => "partial",
-            PermissionState::Unknown => "unknown",
+            Self::Permitted => "permitted",
+            Self::Denied => "denied",
+            Self::Partial => "partial",
+            Self::Unknown => "unknown",
         }
     }
 }
 
 /// Health and loss accounting for one collector (guide §19).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectorHealth {
     /// Collector id (`procfs`, `cgroup_v2`, `docker`, `tmux`, ...).
     pub collector_id: String,
@@ -1203,7 +1203,7 @@ pub struct CollectorHealth {
 }
 
 /// A known collection gap to surface in reports and `sarf gaps`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageGap {
     /// Collector or source.
     pub source_id: String,
@@ -1242,7 +1242,7 @@ impl HostSample {
     ///
     /// Returns `None` when the counters decreased or no time elapsed, so callers can
     /// record a counter anomaly instead of a fabricated spike.
-    pub fn cpu_usage_pct(previous: &HostSample, current: &HostSample) -> Option<f64> {
+    pub fn cpu_usage_pct(previous: &Self, current: &Self) -> Option<f64> {
         let delta = current.cpu.delta(previous.cpu)?;
         let total = delta.total();
         if total == 0 {

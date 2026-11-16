@@ -33,29 +33,29 @@ impl Toggle {
     /// Stable config/DB string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Toggle::Disabled => "disabled",
-            Toggle::Auto => "auto",
-            Toggle::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
         }
     }
 
     /// Whether collection should be attempted at all (auto attempts a bounded
     /// detection step and marks the integration unavailable if absent).
     pub const fn should_attempt(self) -> bool {
-        !matches!(self, Toggle::Disabled)
+        !matches!(self, Self::Disabled)
     }
 
     /// Whether the integration was explicitly requested.
     pub const fn is_explicit(self) -> bool {
-        matches!(self, Toggle::Enabled)
+        matches!(self, Self::Enabled)
     }
 
     /// Parse a config string.
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
-            "disabled" | "disable" | "off" | "false" | "no" | "0" => Some(Toggle::Disabled),
-            "auto" => Some(Toggle::Auto),
-            "enabled" | "enable" | "on" | "true" | "yes" | "1" => Some(Toggle::Enabled),
+            "disabled" | "disable" | "off" | "false" | "no" | "0" => Some(Self::Disabled),
+            "auto" => Some(Self::Auto),
+            "enabled" | "enable" | "on" | "true" | "yes" | "1" => Some(Self::Enabled),
             _ => None,
         }
     }
@@ -98,7 +98,7 @@ impl<'de> Deserialize<'de> for Toggle {
 }
 
 /// General runtime and budget settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct General {
     /// Host/cgroup sampling cadence.
@@ -117,7 +117,7 @@ pub struct General {
 
 impl Default for General {
     fn default() -> Self {
-        General {
+        Self {
             interval_secs: 5,
             process_interval_secs: 5,
             discovery_secs: 30,
@@ -129,7 +129,7 @@ impl Default for General {
 }
 
 /// Process collection settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProcessConfig {
     /// Enable process inventory.
@@ -146,7 +146,7 @@ pub struct ProcessConfig {
 
 impl Default for ProcessConfig {
     fn default() -> Self {
-        ProcessConfig {
+        Self {
             enabled: true,
             store_arguments: false,
             sample_all_processes: false,
@@ -157,7 +157,7 @@ impl Default for ProcessConfig {
 }
 
 /// cgroup v2 collection settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cgroup {
     /// Enable cgroup sampling.
@@ -170,7 +170,7 @@ pub struct Cgroup {
 
 impl Default for Cgroup {
     fn default() -> Self {
-        Cgroup {
+        Self {
             enabled: true,
             sample_secs: 5,
             max_cgroups: 512,
@@ -179,7 +179,7 @@ impl Default for Cgroup {
 }
 
 /// Network accounting settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Network {
     /// Sample host interface counters.
@@ -190,7 +190,7 @@ pub struct Network {
 
 impl Default for Network {
     fn default() -> Self {
-        Network {
+        Self {
             interface_counters: true,
             container_counters: true,
         }
@@ -211,14 +211,14 @@ impl LogSourceKind {
     /// Stable string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            LogSourceKind::File => "file",
-            LogSourceKind::Docker => "docker",
+            Self::File => "file",
+            Self::Docker => "docker",
         }
     }
 }
 
 /// One explicitly configured log source.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogSource {
     /// Stable source id (`nginx-error`, `cloudflared`, ...).
@@ -249,8 +249,7 @@ impl LogSource {
             LogSourceKind::File => self
                 .path
                 .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "<unset path>".to_string()),
+                .map_or_else(|| "<unset path>".to_string(), |p| p.display().to_string()),
             LogSourceKind::Docker => self
                 .container
                 .clone()
@@ -260,7 +259,7 @@ impl LogSource {
 }
 
 /// Bounded log ingestion settings (guide §9).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Logs {
     /// Enable log ingestion.
@@ -291,7 +290,7 @@ pub struct Logs {
 
 impl Default for Logs {
     fn default() -> Self {
-        Logs {
+        Self {
             enabled: true,
             ring_lines: 1000,
             ring_minutes: 10,
@@ -320,7 +319,7 @@ impl Default for Logs {
 }
 
 /// Adaptive sampling settings (guide §7.4).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Adaptive {
     /// Enable incident-mode sampling.
@@ -337,7 +336,7 @@ pub struct Adaptive {
 
 impl Default for Adaptive {
     fn default() -> Self {
-        Adaptive {
+        Self {
             enabled: true,
             incident_interval_ms: 500,
             max_incident_secs: 120,
@@ -365,7 +364,7 @@ pub struct Thresholds {
 
 impl Default for Thresholds {
     fn default() -> Self {
-        Thresholds {
+        Self {
             host_cpu_pct: 10.0,
             service_cpu_pct: 20.0,
             memory_pct: 80.0,
@@ -376,7 +375,7 @@ impl Default for Thresholds {
 }
 
 /// Retention windows (guide §11.4).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Retention {
     /// Raw host/cgroup sample hours.
@@ -395,7 +394,7 @@ pub struct Retention {
 
 impl Default for Retention {
     fn default() -> Self {
-        Retention {
+        Self {
             raw_hours: 48,
             process_raw_hours: 24,
             rollup_1m_days: 14,
@@ -407,7 +406,7 @@ impl Default for Retention {
 }
 
 /// Integration switches.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Integrations {
     /// Docker container metadata.
@@ -426,7 +425,7 @@ pub struct Integrations {
 
 impl Default for Integrations {
     fn default() -> Self {
-        Integrations {
+        Self {
             docker: Toggle::Auto,
             tmux: Toggle::Auto,
             zellij: Toggle::Auto,
@@ -453,7 +452,7 @@ impl Integrations {
 }
 
 /// Report generation bounds (guide §14.3).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Report {
     /// Attribution bucket size.
@@ -474,7 +473,7 @@ pub struct Report {
 
 impl Default for Report {
     fn default() -> Self {
-        Report {
+        Self {
             bucket_secs: 60,
             max_points: 600,
             max_processes: 200,
@@ -515,7 +514,7 @@ pub struct Config {
 impl Config {
     /// Parse and validate configuration text.
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Config = toml::from_str(text)
+        let config: Self = toml::from_str(text)
             .map_err(|err| Error::Config(format!("TOML parse error: {err}")))?;
         config.validate()?;
         Ok(config)
@@ -840,7 +839,7 @@ impl Config {
     }
 
     /// Enabled integration toggles as `(name, toggle)` for status output.
-    pub fn integration_toggles(&self) -> [(&'static str, Toggle); 6] {
+    pub const fn integration_toggles(&self) -> [(&'static str, Toggle); 6] {
         [
             ("docker", self.integrations.docker),
             ("tmux", self.integrations.tmux),

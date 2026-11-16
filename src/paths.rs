@@ -57,7 +57,7 @@ impl DataDir {
                     .map(|dir| dir.join(DATA_DIR_NAME))
             })
             .unwrap_or_else(|| PathBuf::from(DATA_DIR_NAME));
-        DataDir { root }
+        Self { root }
     }
 
     /// Resolve using the process environment and the current executable.
@@ -69,7 +69,7 @@ impl DataDir {
 
     /// Construct directly from a path (tests and integrations).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        DataDir { root: root.into() }
+        Self { root: root.into() }
     }
 
     /// Data-directory root.
@@ -196,7 +196,7 @@ pub struct UsageBytes {
 
 impl UsageBytes {
     /// Total bytes counted against the configured budget.
-    pub fn total(&self) -> u64 {
+    pub const fn total(&self) -> u64 {
         self.database
             .saturating_add(self.wal)
             .saturating_add(self.shm)
@@ -205,6 +205,11 @@ impl UsageBytes {
 }
 
 /// Restrict a directory to owner-only access (`0750` on Unix; no-op elsewhere).
+#[allow(
+    clippy::missing_const_for_fn,
+    reason = "const fn cannot call std::fs::set_permissions on Unix, and the Windows \
+              no-op body must have the same signature"
+)]
 pub fn restrict_dir_permissions(path: &Path) {
     #[cfg(unix)]
     {
@@ -219,6 +224,11 @@ pub fn restrict_dir_permissions(path: &Path) {
 }
 
 /// Restrict a file to owner read/write (`0600` on Unix; no-op elsewhere).
+#[allow(
+    clippy::missing_const_for_fn,
+    reason = "const fn cannot call std::fs::set_permissions on Unix, and the Windows \
+              no-op body must have the same signature"
+)]
 pub fn restrict_file_permissions(path: &Path) {
     #[cfg(unix)]
     {

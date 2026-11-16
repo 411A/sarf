@@ -55,7 +55,7 @@ pub struct LogPolicy {
 impl LogPolicy {
     /// Derive a policy from the validated configuration.
     pub fn from_config(config: &Config) -> Self {
-        LogPolicy {
+        Self {
             ring_lines: config.logs.ring_lines,
             ring_ns: (config.logs.ring_minutes as i64).saturating_mul(60_000_000_000),
             ring_bytes: config.logs.ring_bytes_per_source,
@@ -177,12 +177,12 @@ impl LogRing {
     }
 
     /// Retained bytes (bounded estimate).
-    pub fn bytes(&self) -> u64 {
+    pub const fn bytes(&self) -> u64 {
         self.bytes
     }
 
     /// Records dropped by the caps.
-    pub fn dropped(&self) -> u64 {
+    pub const fn dropped(&self) -> u64 {
         self.dropped
     }
 
@@ -209,7 +209,7 @@ impl LogRing {
     }
 }
 
-fn entry_size(record: &LogRecord) -> u64 {
+const fn entry_size(record: &LogRecord) -> u64 {
     (record.message.len() as u64)
         .saturating_add(record.source_id.len() as u64)
         .saturating_add(32)
@@ -239,11 +239,13 @@ struct FileFollower {
     partial: Vec<u8>,
     initialized: bool,
     needs_restart: bool,
+    /// Discard the first partial line when a tail read starts mid-line.
+    skip_partial: bool,
 }
 
 impl FileFollower {
-    fn new(path: PathBuf) -> Self {
-        FileFollower {
+    const fn new(path: PathBuf) -> Self {
+        Self {
             path,
             file: None,
             identity: None,
@@ -251,6 +253,7 @@ impl FileFollower {
             partial: Vec::new(),
             initialized: false,
             needs_restart: false,
+            skip_partial: false,
         }
     }
 
@@ -286,10 +289,13 @@ impl FileFollower {
             self.position = if self.needs_restart || (self.initialized && (rotated || truncated)) {
                 0
             } else {
-                // First open starts at EOF: replaying an entire historical log would
-                // violate the bounded-read promise. Evidence rings fill from now on.
-                metadata.len()
+                // First open reads a bounded recent tail (ADR-010): enough history to
+                // explain a live incident without replaying an entire archive.
+                metadata
+                    .len()
+                    .saturating_sub(policy.read_bytes_per_cycle as u64)
             };
+            self.skip_partial = self.position > 0;
             self.needs_restart = false;
             self.initialized = true;
         }
@@ -324,14 +330,25 @@ impl FileFollower {
         self.position = self.position.saturating_add(read as u64);
         let mut batch = PollBatch::default();
         let mut start = 0;
-        for (index, byte) in buffer.iter().enumerate() {
+        if self.skip_partial {
+            if let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
+                start = index + 1;
+                self.skip_partial = false;
+            } else {
+                // The whole chunk is the middle of a very long line. Keep skipping
+                // on the next poll rather than storing a fragment.
+                self.partial.clear();
+                return batch;
+            }
+        }
+        for (index, byte) in buffer.iter().enumerate().skip(start) {
             if *byte == b'\n' {
                 let mut line = std::mem::take(&mut self.partial);
                 line.extend_from_slice(&buffer[start..index]);
                 let text = String::from_utf8_lossy(&line)
                     .trim_end_matches('\r')
                     .to_string();
-                batch.lines.push(bound_line(text, policy));
+                batch.lines.push(bound_line(&text, policy));
                 start = index + 1;
             }
         }
@@ -340,7 +357,7 @@ impl FileFollower {
             if self.partial.len() > policy.max_line_bytes {
                 let text = String::from_utf8_lossy(&self.partial).into_owned();
                 self.partial.clear();
-                batch.lines.push(bound_line(text, policy));
+                batch.lines.push(bound_line(&text, policy));
             }
         }
         if batch.lines.len() > MAX_LINES_PER_POLL {
@@ -351,8 +368,8 @@ impl FileFollower {
     }
 }
 
-fn bound_line(text: String, policy: &LogPolicy) -> RawLine {
-    let (text, truncated) = crate::store::truncate_utf8(&text, policy.max_line_bytes);
+fn bound_line(text: &str, policy: &LogPolicy) -> RawLine {
+    let (text, truncated) = crate::store::truncate_utf8(text, policy.max_line_bytes);
     RawLine { text, truncated }
 }
 
@@ -388,8 +405,8 @@ struct DockerFollower {
 }
 
 impl DockerFollower {
-    fn new(container: String) -> Self {
-        DockerFollower {
+    const fn new(container: String) -> Self {
+        Self {
             container,
             last_wall_ns: None,
         }
@@ -476,7 +493,7 @@ struct ManagedSource {
 }
 
 /// Per-source health snapshot for collector health and `sarf doctor`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceHealth {
     /// Source id.
     pub source_id: String,
@@ -533,7 +550,7 @@ impl LogManager {
             .iter()
             .map(|source| managed_source(source, &policy))
             .collect();
-        LogManager { sources, policy }
+        Self { sources, policy }
     }
 
     /// Poll every file source once.
@@ -544,7 +561,7 @@ impl LogManager {
             if matches!(source.tail, Tail::Docker(_)) {
                 continue;
             }
-            LogManager::poll_source(policy, source, stamps, &mut pulse);
+            Self::poll_source(policy, source, stamps, &mut pulse);
         }
         pulse
     }
@@ -557,7 +574,7 @@ impl LogManager {
             if !matches!(source.tail, Tail::Docker(_)) {
                 continue;
             }
-            LogManager::poll_source(policy, source, stamps, &mut pulse);
+            Self::poll_source(policy, source, stamps, &mut pulse);
         }
         pulse
     }
@@ -696,12 +713,12 @@ impl LogManager {
     }
 
     /// Number of configured sources.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.sources.len()
     }
 
     /// Whether no sources are configured.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.sources.is_empty()
     }
 }
@@ -1151,9 +1168,10 @@ mod tests {
             read_bytes_per_cycle: 4096,
             ..policy()
         };
-        // First poll starts at EOF, so historical content is not replayed.
+        // First poll reads a bounded recent tail, so the existing line is observed.
         let first = follower.poll(&policy);
-        assert!(first.lines.is_empty(), "lines: {:?}", first.lines);
+        assert_eq!(first.lines.len(), 1, "lines: {:?}", first.lines);
+        assert_eq!(first.lines[0].text, "old line");
         assert!(first.error.is_none());
         append(&path, b"first new\nsecond partial");
         let second = follower.poll(&policy);

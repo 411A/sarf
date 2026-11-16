@@ -128,7 +128,7 @@ pub fn parse_tmux_panes(text: &str) -> Vec<PaneBinding> {
             pane_pid,
             current_command: fields
                 .get(6)
-                .map(|value| value.to_string())
+                .map(ToString::to_string)
                 .filter(|value| !value.is_empty()),
         });
     }

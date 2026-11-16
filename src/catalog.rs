@@ -68,7 +68,7 @@ impl Catalog {
                 by_executable.insert(executable.to_ascii_lowercase(), index);
             }
         }
-        Catalog {
+        Self {
             tools,
             by_comm,
             by_executable,
@@ -122,34 +122,13 @@ impl Catalog {
                     .copied()
             });
 
-        let (tool, category, role) = match tool_index.and_then(|index| self.tools.get(index)) {
-            Some(spec) => {
-                let role = spec.roles.iter().find_map(|rule| {
-                    let equals_match = rule
-                        .comm_equals
-                        .iter()
-                        .any(|needle| comm_lower == needle.to_ascii_lowercase());
-                    let comm_match = rule
-                        .comm_contains
-                        .iter()
-                        .any(|needle| comm_lower.contains(&needle.to_ascii_lowercase()));
-                    let argv_match = argv_lower.as_ref().is_some_and(|argv| {
-                        rule.argv_contains
-                            .iter()
-                            .any(|needle| argv.contains(&needle.to_ascii_lowercase()))
-                    });
-                    let cgroup_match = cgroup_path.is_some_and(|path| {
-                        rule.cgroup_contains
-                            .iter()
-                            .any(|needle| path.contains(needle))
-                    });
-                    (equals_match || comm_match || argv_match || cgroup_match)
-                        .then(|| rule.label.clone())
+        let (tool, category, role) =
+            tool_index
+                .and_then(|index| self.tools.get(index))
+                .map_or((None, None, None), |spec| {
+                    let role = role_label(spec, &comm_lower, argv_lower.as_deref(), cgroup_path);
+                    (Some(spec.id.clone()), Some(spec.category), role)
                 });
-                (Some(spec.id.clone()), Some(spec.category), role)
-            }
-            None => (None, None, None),
-        };
 
         let unit = cgroup_path.and_then(systemd_unit_from_cgroup);
         let container_id = cgroup_path.and_then(container_from_cgroup);
@@ -174,6 +153,36 @@ impl Catalog {
     }
 }
 
+/// First matching role rule for a recognized tool.
+fn role_label(
+    spec: &ToolSpec,
+    comm_lower: &str,
+    argv_lower: Option<&str>,
+    cgroup_path: Option<&str>,
+) -> Option<String> {
+    spec.roles.iter().find_map(|rule| {
+        let equals_match = rule
+            .comm_equals
+            .iter()
+            .any(|needle| comm_lower == needle.to_ascii_lowercase());
+        let comm_match = rule
+            .comm_contains
+            .iter()
+            .any(|needle| comm_lower.contains(&needle.to_ascii_lowercase()));
+        let argv_match = argv_lower.is_some_and(|argv| {
+            rule.argv_contains
+                .iter()
+                .any(|needle| argv.contains(&needle.to_ascii_lowercase()))
+        });
+        let cgroup_match = cgroup_path.is_some_and(|path| {
+            rule.cgroup_contains
+                .iter()
+                .any(|needle| path.contains(needle))
+        });
+        (equals_match || comm_match || argv_match || cgroup_match).then(|| rule.label.clone())
+    })
+}
+
 /// Infer the systemd unit from a cgroup path.
 ///
 /// The nearest `.service` or `.scope` ancestor is the unit. User session scopes are
@@ -181,8 +190,10 @@ impl Catalog {
 pub fn systemd_unit_from_cgroup(path: &str) -> Option<String> {
     path.split('/')
         .rev()
-        .find(|segment| segment.ends_with(".service") || segment.ends_with(".scope"))
-        .map(|segment| segment.to_string())
+        .find(|segment| {
+            segment.strip_suffix(".service").is_some() || segment.strip_suffix(".scope").is_some()
+        })
+        .map(ToString::to_string)
 }
 
 /// Extract a Docker/containerd container id from a cgroup path.
@@ -245,7 +256,7 @@ mod tests {
             assert!(ids.contains(&expected), "missing {expected}");
         }
         assert!(catalog.get("nginx").is_some());
-        assert!(catalog.category_of("nginx") == Some(ToolCategory::WebServer));
+        assert_eq!(catalog.category_of("nginx"), Some(ToolCategory::WebServer));
     }
 
     #[test]

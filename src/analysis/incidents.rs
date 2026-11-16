@@ -71,17 +71,22 @@ pub struct Signal {
     pub reason: String,
 }
 
+/// One incident update applied by the daemon.
+///
+/// The tuple is `(incident_id, ended_wall_ns, peak, evidence, evidence_loss)`.
+pub type IncidentUpdate = (i64, Option<i64>, f64, Option<serde_json::Value>, bool);
+
 /// Engine output: records to persist and events implied.
 ///
-/// The daemon writes `opened` incidents, applies `updated` rows (the tuple is
-/// `(incident_id, ended_wall_ns, peak, evidence, evidence_loss)`), and appends
-/// `events`. Every list is bounded by the number of open incidents.
+/// The daemon writes `opened` incidents, applies `updated` rows (see
+/// [`IncidentUpdate`]) and appends `events`. Every list is bounded by the number of
+/// open incidents.
 #[derive(Debug, Clone, Default)]
 pub struct IncidentPulse {
     /// Incidents that must be inserted (ids are pre-allocated).
     pub opened: Vec<Incident>,
-    /// Incident updates: `(id, ended, peak, evidence, loss)`.
-    pub updated: Vec<(i64, Option<i64>, f64, Option<serde_json::Value>, bool)>,
+    /// Incident updates: see [`IncidentUpdate`].
+    pub updated: Vec<IncidentUpdate>,
     /// Events implied by opens and closes.
     pub events: Vec<EventRecord>,
 }
@@ -157,7 +162,7 @@ impl IncidentEngine {
     pub fn new(config: &Config, first_id: i64) -> Self {
         let hysteresis_secs = config.adaptive.recovery_hysteresis_secs;
         let cooldown_secs = hysteresis_secs.max(MIN_COOLDOWN_SECS);
-        IncidentEngine {
+        Self {
             states: HashMap::new(),
             next_id: first_id.max(0),
             hysteresis_ns: secs_to_ns(hysteresis_secs),
@@ -173,6 +178,12 @@ impl IncidentEngine {
     /// new row exactly once. Updates to an already-open incident accumulate
     /// internally and are drained by [`IncidentEngine::take_pulse`] or
     /// [`IncidentEngine::tick`].
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "a Signal is a small per-observation value built by the caller; the \
+                  engine reads it once and drops it, so taking ownership keeps the \
+                  public observation API lifetime-free"
+    )]
     pub fn observe(&mut self, signal: Signal) -> Option<Incident> {
         if !signal.value.is_finite() {
             return None;
@@ -345,7 +356,7 @@ impl IncidentEngine {
         signal.value.is_finite()
             && signal.value > NOISE_FLOOR
             && signal.value >= signal.threshold
-            && signal.value > signal.baseline * BASELINE_MARGIN + OPEN_EPSILON
+            && signal.value > signal.baseline.mul_add(BASELINE_MARGIN, OPEN_EPSILON)
     }
 }
 
@@ -364,7 +375,7 @@ fn bounded_reason(reason: &str) -> String {
 }
 
 /// Severity assigned to the events of a metric.
-fn severity_for(metric: Metric) -> Severity {
+const fn severity_for(metric: Metric) -> Severity {
     match metric {
         Metric::Cpu | Metric::Memory | Metric::PsiCpu | Metric::PsiMemory | Metric::PsiIo => {
             Severity::Warn
@@ -584,7 +595,7 @@ mod tests {
         let mut engine = IncidentEngine::new(&config, 1);
         open_incident(&mut engine, "cgroup:1:2", 1_000);
         engine.take_pulse();
-        let below = 20.0 * RECOVERY_FACTOR - 1.0;
+        let below = 20.0f64.mul_add(RECOVERY_FACTOR, -1.0);
         assert!(engine
             .observe(signal("cgroup:1:2", Metric::Cpu, below, 5.0, 20.0, 2_000))
             .is_none());

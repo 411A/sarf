@@ -86,7 +86,7 @@ pub struct HostInfo {
 }
 
 /// One process lifetime row. `end_*` fields are `None` while the process is alive.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessLifetimeRow {
     /// Process entity id.
     pub process_instance_id: String,
@@ -169,24 +169,24 @@ pub struct WriteItem {
 
 impl WriteItem {
     /// Low-priority record (INFO logs, low-value samples).
-    pub fn low(record: WriteRecord) -> Self {
-        WriteItem {
+    pub const fn low(record: WriteRecord) -> Self {
+        Self {
             priority: WritePriority::Low,
             record,
         }
     }
 
     /// Normal-priority record.
-    pub fn normal(record: WriteRecord) -> Self {
-        WriteItem {
+    pub const fn normal(record: WriteRecord) -> Self {
+        Self {
             priority: WritePriority::Normal,
             record,
         }
     }
 
     /// Critical record (incidents, critical logs, gaps).
-    pub fn critical(record: WriteRecord) -> Self {
-        WriteItem {
+    pub const fn critical(record: WriteRecord) -> Self {
+        Self {
             priority: WritePriority::Critical,
             record,
         }
@@ -284,7 +284,7 @@ impl Store {
         let conn = Connection::open(path).map_err(|err| {
             Error::Storage(format!("cannot open database {}: {err}", path.display()))
         })?;
-        let mut store = Store {
+        let mut store = Self {
             conn,
             path: path.to_path_buf(),
         };
@@ -298,7 +298,7 @@ impl Store {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()
             .map_err(|err| Error::Storage(format!("in-memory db: {err}")))?;
-        let mut store = Store {
+        let mut store = Self {
             conn,
             path: PathBuf::from(":memory:"),
         };
@@ -322,7 +322,7 @@ impl Store {
         .map_err(|err| Error::Storage(format!("cannot open {}: {err}", path.display())))?;
         let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
         let _ = conn.pragma_update(None, "query_only", true);
-        Ok(Store {
+        Ok(Self {
             conn,
             path: path.to_path_buf(),
         })
@@ -334,12 +334,12 @@ impl Store {
     }
 
     /// Underlying connection (queries only).
-    pub fn connection(&self) -> &Connection {
+    pub const fn connection(&self) -> &Connection {
         &self.conn
     }
 
     /// Mutable connection (retention/tests that need transactions).
-    pub fn connection_mut(&mut self) -> &mut Connection {
+    pub const fn connection_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }
 
@@ -350,7 +350,7 @@ impl Store {
                 .map_err(|err| Error::Storage(format!("pragma {sql}: {err}")))
         };
         // WAL is unsuitable for private in-memory databases.
-        if self.path != PathBuf::from(":memory:") {
+        if self.path != *":memory:" {
             pragma("PRAGMA journal_mode = WAL;")?;
         }
         pragma("PRAGMA synchronous = NORMAL;")?;
@@ -359,7 +359,7 @@ impl Store {
         pragma("PRAGMA cache_size = -2000;")?;
         pragma("PRAGMA temp_store = MEMORY;")?;
         pragma("PRAGMA wal_autocheckpoint = 1000;")?;
-        if !existed && self.path != PathBuf::from(":memory:") {
+        if !existed && self.path != *":memory:" {
             // auto_vacuum must be configured before the first table is created.
             pragma("PRAGMA auto_vacuum = INCREMENTAL;")?;
             pragma("VACUUM;")?;
@@ -750,7 +750,7 @@ impl Store {
                     log.entity_id,
                     log.source_id,
                     log.stream.as_str(),
-                    log.level.map(|l| l.as_str()),
+                    log.level.map(super::model::Severity::as_str),
                     message,
                     truncated || log.truncated,
                     log.redacted,
@@ -1001,20 +1001,14 @@ fn sum_net(
     counters: &std::collections::BTreeMap<String, crate::model::NetCounters>,
     field: impl Fn(&crate::model::NetCounters) -> u64,
 ) -> u64 {
-    counters
-        .values()
-        .map(|c| field(c))
-        .fold(0u64, |acc, v| acc.saturating_add(v))
+    counters.values().map(field).fold(0u64, u64::saturating_add)
 }
 
 fn sum_disk(
     counters: &std::collections::BTreeMap<String, crate::model::DiskCounters>,
     field: impl Fn(&crate::model::DiskCounters) -> u64,
 ) -> u64 {
-    counters
-        .values()
-        .map(|c| field(c))
-        .fold(0u64, |acc, v| acc.saturating_add(v))
+    counters.values().map(field).fold(0u64, u64::saturating_add)
 }
 
 /// Serialize JSON with a byte bound; returns `"{}"` style placeholder on failure.
@@ -1089,9 +1083,7 @@ mod tests {
             stable_key: "h1".into(),
             name: "test-host".into(),
             source: "test".into(),
-            labels: [("env".to_string(), "test".to_string())]
-                .into_iter()
-                .collect(),
+            labels: std::iter::once(("env".to_string(), "test".to_string())).collect(),
             first_seen_wall_ns: now,
             last_seen_wall_ns: now,
         };
@@ -1349,7 +1341,7 @@ mod tests {
         let (text, truncated) = truncate_utf8("héllo wörld", 6);
         assert!(truncated);
         assert_eq!(text, "héllo");
-        assert!(!text.is_char_boundary(text.len()) == false);
+        assert!(text.is_char_boundary(text.len()));
         let (same, truncated) = truncate_utf8("short", 100);
         assert_eq!(same, "short");
         assert!(!truncated);

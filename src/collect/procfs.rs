@@ -51,7 +51,7 @@ pub fn read_optional(path: &Path) -> Option<String> {
 }
 
 /// One `/proc/stat` snapshot.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatSample {
     /// Aggregate CPU counters.
     pub cpu: CpuTimes,
@@ -90,9 +90,8 @@ pub fn parse_stat(text: &str) -> Result<StatSample> {
             }
             sample.per_cpu.push(ticks);
         } else {
-            let value = match fields.next() {
-                Some(value) => value,
-                None => continue,
+            let Some(value) = fields.next() else {
+                continue;
             };
             match key {
                 "procs_running" => sample.procs_running = parse_u64(value, "procs_running").ok(),

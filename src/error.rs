@@ -79,7 +79,7 @@ impl Error {
             message.truncate(MAX);
             message.push('…');
         }
-        Error::Parse {
+        Self::Parse {
             source_name,
             message,
         }
@@ -87,7 +87,7 @@ impl Error {
 
     /// Build an [`Error::Unavailable`].
     pub fn unavailable(what: &'static str, reason: impl Into<String>) -> Self {
-        Error::Unavailable {
+        Self::Unavailable {
             what,
             reason: reason.into(),
         }
@@ -97,9 +97,9 @@ impl Error {
     pub fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         let path = path.into();
         if source.kind() == std::io::ErrorKind::PermissionDenied {
-            return Error::PermissionDenied { path };
+            return Self::PermissionDenied { path };
         }
-        Error::Io { path, source }
+        Self::Io { path, source }
     }
 }
 

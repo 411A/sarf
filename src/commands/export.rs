@@ -298,14 +298,14 @@ fn tool_json(tool: &crate::model::ToolSpec) -> serde_json::Value {
 
 /// Unused but kept for symmetry with future export columns.
 #[allow(dead_code)]
-fn metric_header(metric: Metric) -> &'static str {
+const fn metric_header(metric: Metric) -> &'static str {
     metric.as_str()
 }
 
 /// Format a log level for exports.
 #[allow(dead_code)]
 fn level_label(level: Option<Severity>) -> &'static str {
-    level.map(Severity::as_str).unwrap_or("-")
+    level.map_or("-", Severity::as_str)
 }
 
 /// Format an export timestamp.

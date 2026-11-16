@@ -39,12 +39,12 @@ pub struct HostTiming {
     pub uptime_secs: Option<f64>,
     /// `/proc/stat` `btime` epoch seconds.
     pub boot_time_secs: Option<u64>,
-    /// USER_HZ used to convert start ticks.
+    /// `USER_HZ` used to convert start ticks.
     pub clock_ticks: u64,
 }
 
 /// A process start (or exec update) discovered this cycle.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessStart {
     /// Process entity id.
     pub entity_id: String,
@@ -154,7 +154,7 @@ impl ProcessCollector {
         store_arguments: bool,
         catalog: Catalog,
     ) -> Self {
-        ProcessCollector {
+        Self {
             root,
             boot_short: boot_short.into(),
             max_processes: max_processes.max(1),
@@ -211,19 +211,13 @@ impl ProcessCollector {
 
         for pid in pids {
             cycle.scanned += 1;
-            let stat_text = match self.root.read_proc(format!("{pid}/stat")) {
-                Ok(text) => text,
-                Err(_) => {
-                    cycle.unreadable = cycle.unreadable.saturating_add(1);
-                    continue;
-                }
+            let Ok(stat_text) = self.root.read_proc(format!("{pid}/stat")) else {
+                cycle.unreadable = cycle.unreadable.saturating_add(1);
+                continue;
             };
-            let stat = match super::procfs::parse_pid_stat(&stat_text) {
-                Ok(stat) => stat,
-                Err(_) => {
-                    cycle.unreadable = cycle.unreadable.saturating_add(1);
-                    continue;
-                }
+            let Ok(stat) = super::procfs::parse_pid_stat(&stat_text) else {
+                cycle.unreadable = cycle.unreadable.saturating_add(1);
+                continue;
             };
             let executable = std::fs::read_link(proc_root.join(format!("{pid}/exe")))
                 .ok()
@@ -348,8 +342,8 @@ impl ProcessCollector {
                         start_mono_ns: known.start_mono_ns,
                     });
                 }
-                known.comm = item.observation.comm.clone();
-                known.executable = item.observation.executable.clone();
+                known.comm.clone_from(&item.observation.comm);
+                known.executable.clone_from(&item.observation.executable);
                 known.last_ticks = ticks;
                 known.last_mono_ns = stamps.mono;
                 known.misses = 0;
@@ -424,34 +418,39 @@ impl ProcessCollector {
             .collect();
         for entity_id in stale {
             let complete_scan = cycle.unreadable == 0;
-            let known = self.known.get_mut(&entity_id).expect("known process");
+            let Some(known) = self.known.get_mut(&entity_id) else {
+                continue;
+            };
             known.misses = known.misses.saturating_add(1);
-            if complete_scan || known.misses >= 3 {
-                let known = self.known.remove(&entity_id).expect("known process");
-                let reason = if complete_scan { "exited" } else { "lost" };
-                cycle.ends.push(ProcessEnd {
-                    entity_id: entity_id.clone(),
-                    end_wall_ns: stamps.wall,
-                    end_mono_ns: stamps.mono,
-                    reason: reason.to_string(),
-                    pid: known.pid,
-                    comm: known.comm.clone(),
-                });
-                cycle.events.push(EventRecord {
-                    wall_ns: stamps.wall,
-                    mono_ns: Some(stamps.mono),
-                    entity_id: Some(entity_id),
-                    kind: EventKind::ProcessExited,
-                    severity: Severity::Info,
-                    payload: json!({
-                        "pid": known.pid,
-                        "comm": known.comm,
-                        "reason": reason,
-                    }),
-                    provenance: "procfs".to_string(),
-                    lost_before: 0,
-                });
+            if !complete_scan && known.misses < 3 {
+                continue;
             }
+            let Some(known) = self.known.remove(&entity_id) else {
+                continue;
+            };
+            let reason = if complete_scan { "exited" } else { "lost" };
+            cycle.ends.push(ProcessEnd {
+                entity_id: entity_id.clone(),
+                end_wall_ns: stamps.wall,
+                end_mono_ns: stamps.mono,
+                reason: reason.to_string(),
+                pid: known.pid,
+                comm: known.comm.clone(),
+            });
+            cycle.events.push(EventRecord {
+                wall_ns: stamps.wall,
+                mono_ns: Some(stamps.mono),
+                entity_id: Some(entity_id),
+                kind: EventKind::ProcessExited,
+                severity: Severity::Info,
+                payload: json!({
+                    "pid": known.pid,
+                    "comm": known.comm,
+                    "reason": reason,
+                }),
+                provenance: "procfs".to_string(),
+                lost_before: 0,
+            });
         }
 
         // Entities for new/relabelled processes.
@@ -495,7 +494,7 @@ impl ProcessCollector {
             .enumerate()
             .filter_map(|(index, item)| item.rss.map(|rss| (index, rss)))
             .collect();
-        by_mem.sort_by(|left, right| right.1.cmp(&left.1));
+        by_mem.sort_by_key(|&(_, rss)| std::cmp::Reverse(rss));
         selected.extend(
             by_mem
                 .into_iter()

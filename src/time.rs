@@ -39,16 +39,16 @@ impl ClockDomain {
     /// Stable database/API string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            ClockDomain::ClockMonotonic => "clock_monotonic",
-            ClockDomain::StdInstant => "std_instant",
-            ClockDomain::Simulated => "simulated",
+            Self::ClockMonotonic => "clock_monotonic",
+            Self::StdInstant => "std_instant",
+            Self::Simulated => "simulated",
         }
     }
 
     /// Whether this domain is boot-relative and therefore comparable across
     /// processes on the same boot.
     pub const fn is_boot_relative(self) -> bool {
-        matches!(self, ClockDomain::ClockMonotonic)
+        matches!(self, Self::ClockMonotonic)
     }
 }
 
@@ -91,7 +91,7 @@ impl Stamps {
         boot_id: impl Into<String>,
         domain: ClockDomain,
     ) -> Self {
-        Stamps {
+        Self {
             wall,
             mono,
             boot_id: boot_id.into(),
@@ -101,7 +101,7 @@ impl Stamps {
 
     /// Capture both clocks from a clock into full stamps.
     pub fn capture(clock: &dyn Clock, boot_id: &str) -> Self {
-        Stamps {
+        Self {
             wall: clock.wall_ns(),
             mono: clock.mono_ns(),
             boot_id: boot_id.to_string(),
@@ -110,7 +110,7 @@ impl Stamps {
     }
 
     /// Whether the monotonic value can be compared across processes on this boot.
-    pub fn is_boot_scoped(&self) -> bool {
+    pub const fn is_boot_scoped(&self) -> bool {
         self.domain.is_boot_relative() && !self.boot_id.is_empty()
     }
 }
@@ -125,7 +125,7 @@ pub struct SystemClock {
 impl SystemClock {
     /// Create a clock anchored at process start.
     pub fn new() -> Self {
-        SystemClock {
+        Self {
             epoch: std::time::Instant::now(),
         }
     }
@@ -159,8 +159,7 @@ impl Clock for SystemClock {
     fn wall_ns(&self) -> WallNs {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_nanos() as i64)
     }
 
     fn mono_ns(&self) -> MonoNs {
@@ -199,7 +198,7 @@ pub struct FakeClock {
 impl FakeClock {
     /// Start a fake clock at the given wall/monotonic timestamps.
     pub fn new(wall_ns: WallNs, mono_ns: MonoNs) -> Self {
-        FakeClock {
+        Self {
             wall: Arc::new(AtomicI64::new(wall_ns)),
             mono: Arc::new(AtomicI64::new(mono_ns)),
         }
@@ -251,41 +250,37 @@ pub fn system_clock() -> SharedClock {
 
 /// Wall-clock timestamp to RFC 3339 in the machine's local time zone.
 pub fn format_wall_local(wall_ns: WallNs) -> String {
-    match chrono::DateTime::from_timestamp(
-        wall_ns / 1_000_000_000,
-        (wall_ns % 1_000_000_000) as u32,
-    ) {
-        Some(utc) => utc
-            .with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M:%S%.3f %Z")
-            .to_string(),
-        None => format!("invalid timestamp {wall_ns}"),
-    }
+    chrono::DateTime::from_timestamp(wall_ns / 1_000_000_000, (wall_ns % 1_000_000_000) as u32)
+        .map_or_else(
+            || format!("invalid timestamp {wall_ns}"),
+            |utc| {
+                utc.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S%.3f %Z")
+                    .to_string()
+            },
+        )
 }
 
 /// Wall-clock timestamp to a compact local `HH:MM:SS` label (report axes).
 pub fn format_wall_clock(wall_ns: WallNs) -> String {
-    match chrono::DateTime::from_timestamp(
-        wall_ns / 1_000_000_000,
-        (wall_ns % 1_000_000_000) as u32,
-    ) {
-        Some(utc) => utc
-            .with_timezone(&chrono::Local)
-            .format("%H:%M:%S")
-            .to_string(),
-        None => "--:--:--".to_string(),
-    }
+    chrono::DateTime::from_timestamp(wall_ns / 1_000_000_000, (wall_ns % 1_000_000_000) as u32)
+        .map_or_else(
+            || "--:--:--".to_string(),
+            |utc| {
+                utc.with_timezone(&chrono::Local)
+                    .format("%H:%M:%S")
+                    .to_string()
+            },
+        )
 }
 
 /// Wall-clock timestamp to RFC 3339 in UTC (stable across machines).
 pub fn format_wall_rfc3339(wall_ns: WallNs) -> String {
-    match chrono::DateTime::from_timestamp(
-        wall_ns / 1_000_000_000,
-        (wall_ns % 1_000_000_000) as u32,
-    ) {
-        Some(utc) => utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        None => "invalid".to_string(),
-    }
+    chrono::DateTime::from_timestamp(wall_ns / 1_000_000_000, (wall_ns % 1_000_000_000) as u32)
+        .map_or_else(
+            || "invalid".to_string(),
+            |utc| utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        )
 }
 
 #[cfg(test)]

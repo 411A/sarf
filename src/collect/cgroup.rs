@@ -39,7 +39,7 @@ pub struct CgroupCollector {
 impl CgroupCollector {
     /// Create a collector with a hard bound on nodes per cycle.
     pub fn new(root: SourceRoot, max_cgroups: usize) -> Self {
-        CgroupCollector {
+        Self {
             root,
             max_cgroups: max_cgroups.max(1),
         }
@@ -91,8 +91,7 @@ impl CgroupCollector {
                     entity.last_seen_wall_ns = stamps.wall;
                     cycle.entities.push(entity);
                 }
-                Ok(None) => cycle.skipped = cycle.skipped.saturating_add(1),
-                Err(_) => cycle.skipped = cycle.skipped.saturating_add(1),
+                Ok(None) | Err(_) => cycle.skipped = cycle.skipped.saturating_add(1),
             }
         }
         Ok(cycle)
@@ -112,9 +111,8 @@ fn collect_directories(
     let entries = std::fs::read_dir(dir).map_err(|err| Error::io(dir, err))?;
     let mut child_dirs = Vec::new();
     for entry in entries.flatten() {
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
+        let Ok(file_type) = entry.file_type() else {
+            continue;
         };
         if file_type.is_dir() {
             child_dirs.push(entry.path());

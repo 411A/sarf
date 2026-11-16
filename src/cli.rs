@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand, ValueEnum};
                   HTML report. Missing data is shown as unavailable, never as zero."
 )]
 pub struct Cli {
-    /// Centralized data directory (default: SARF_DATA_DIR or ./sarf-data).
+    /// Centralized data directory (default: `SARF_DATA_DIR` or ./sarf-data).
     #[arg(long, global = true, value_name = "PATH")]
     pub data_dir: Option<PathBuf>,
     /// Configuration file (default: <data-dir>/sarf.toml).
@@ -99,7 +99,7 @@ pub enum Command {
         /// Maximum windows.
         #[arg(long, default_value_t = 12)]
         limit: usize,
-        /// Optional metric filter (cpu, memory, psi_cpu, psi_memory, psi_io, load).
+        /// Optional metric filter (cpu, memory, `psi_cpu`, `psi_memory`, `psi_io`, load).
         #[arg(long)]
         metric: Option<String>,
     },

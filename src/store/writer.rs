@@ -92,6 +92,7 @@ pub struct Writer {
     tx: SyncSender<Message>,
     handle: Option<JoinHandle<()>>,
     counters: Arc<Counters>,
+    capacity: u64,
 }
 
 enum Message {
@@ -127,10 +128,11 @@ impl Writer {
             .stack_size(256 * 1024)
             .spawn(move || writer_loop(store, rx, thread_counters))
             .map_err(|err| Error::Storage(format!("cannot spawn writer thread: {err}")))?;
-        Ok(Writer {
+        Ok(Self {
             tx,
             handle: Some(handle),
             counters,
+            capacity: capacity as u64,
         })
     }
 
@@ -154,7 +156,7 @@ impl Writer {
         // Attempt 1: enqueue as-is.
         match self.enqueue(items) {
             Enqueue::Queued => {
-                self.note_queued(submitted);
+                self.note_high_water();
                 return SubmitOutcome::Accepted;
             }
             Enqueue::Gone => {
@@ -178,7 +180,7 @@ impl Writer {
                     self.counters
                         .dropped_low
                         .fetch_add(dropped_low, Ordering::Relaxed);
-                    self.note_queued(kept);
+                    self.note_high_water();
                     return SubmitOutcome::PartiallyDropped {
                         low: dropped_low,
                         normal: 0,
@@ -200,7 +202,6 @@ impl Writer {
         }
 
         if !items.is_empty() {
-            let critical_records = items.len() as u64;
             let deadline = Instant::now() + CRITICAL_BLOCK_LIMIT;
             let mut items = items;
             loop {
@@ -212,7 +213,7 @@ impl Writer {
                         self.counters
                             .dropped_normal
                             .fetch_add(dropped_normal, Ordering::Relaxed);
-                        self.note_queued(critical_records);
+                        self.note_high_water();
                         return SubmitOutcome::PartiallyDropped {
                             low: dropped_low,
                             normal: dropped_normal,
@@ -259,19 +260,56 @@ impl Writer {
     }
 
     fn enqueue(&self, items: Vec<WriteItem>) -> Enqueue {
+        let count = items.len() as u64;
+        if !self.reserve(count) {
+            return Enqueue::Full(items);
+        }
         match self.tx.try_send(Message::Batch(items)) {
             Ok(()) => Enqueue::Queued,
-            Err(TrySendError::Full(Message::Batch(back))) => Enqueue::Full(back),
-            Err(TrySendError::Disconnected(_)) => Enqueue::Gone,
-            Err(TrySendError::Full(_)) => unreachable!("only batches are submitted"),
+            Err(TrySendError::Full(Message::Batch(back))) => {
+                self.release(back.len() as u64);
+                Enqueue::Full(back)
+            }
+            Err(TrySendError::Disconnected(Message::Batch(back))) => {
+                self.release(back.len() as u64);
+                Enqueue::Gone
+            }
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                unreachable!("only batches are submitted")
+            }
         }
     }
 
-    fn note_queued(&self, records: u64) {
-        if records == 0 {
-            return;
+    /// Reserve queue capacity in records, not messages.
+    ///
+    /// A batch can contain many records; without this reservation a single large
+    /// submit would bypass the documented queue bound.
+    fn reserve(&self, count: u64) -> bool {
+        let mut current = self.counters.depth.load(Ordering::Relaxed);
+        loop {
+            if current.saturating_add(count) > self.capacity {
+                return false;
+            }
+            match self.counters.depth.compare_exchange_weak(
+                current,
+                current + count,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
         }
-        let depth = self.counters.depth.fetch_add(records, Ordering::Relaxed) + records;
+    }
+
+    fn release(&self, count: u64) {
+        if count > 0 {
+            self.counters.depth.fetch_sub(count, Ordering::Relaxed);
+        }
+    }
+
+    fn note_high_water(&self) {
+        let depth = self.counters.depth.load(Ordering::Relaxed);
         let mut previous = self.counters.high_water.load(Ordering::Relaxed);
         while depth > previous {
             match self.counters.high_water.compare_exchange_weak(
@@ -306,10 +344,9 @@ impl Writer {
     pub fn shutdown(mut self) -> Result<WriterStats> {
         let (ack_tx, ack_rx) = mpsc::sync_channel(0);
         let result = if self.tx.send(Message::Shutdown(ack_tx)).is_ok() {
-            match ack_rx.recv_timeout(Duration::from_secs(30)) {
-                Ok(inner) => inner,
-                Err(_) => Err(Error::Storage("writer shutdown timed out".into())),
-            }
+            ack_rx
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap_or_else(|_| Err(Error::Storage("writer shutdown timed out".into())))
         } else {
             Ok(())
         };
@@ -346,6 +383,11 @@ fn split_by_priority(items: Vec<WriteItem>, keep_at: WritePriority) -> (Vec<Writ
     (keep, dropped)
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the writer thread takes ownership of its Store and the shared counters; \
+              both must live for the whole thread, so borrowing is impossible"
+)]
 fn writer_loop(mut store: Store, rx: Receiver<Message>, counters: Arc<Counters>) {
     let mut pending: Vec<WriteItem> = Vec::with_capacity(MAX_BATCH_RECORDS);
     loop {

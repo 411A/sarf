@@ -37,7 +37,7 @@ pub const LIFETIME_RETENTION_DAYS: i64 = 30;
 pub const RELATIONSHIP_RETENTION_DAYS: i64 = 7;
 
 /// Retention and budget policy derived from configuration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionPolicy {
     /// Raw host/cgroup sample hours.
     pub raw_hours: u64,
@@ -60,7 +60,7 @@ pub struct RetentionPolicy {
 impl RetentionPolicy {
     /// Build a policy from validated configuration.
     pub fn from_config(config: &Config, clock_ticks_per_second: u64) -> Self {
-        RetentionPolicy {
+        Self {
             raw_hours: config.retention.raw_hours,
             process_raw_hours: config.retention.process_raw_hours,
             rollup_1m_days: config.retention.rollup_1m_days,
@@ -140,11 +140,12 @@ pub fn prune(
     data_dir: &std::path::Path,
 ) -> Result<PruneReport> {
     let started = std::time::Instant::now();
-    let mut report = PruneReport::default();
-
-    report.host_rollup_rows = rollup_host(store, policy, now_wall_ns)?;
-    report.cgroup_rollup_rows = rollup_cgroups(store, policy, now_wall_ns)?;
-    report.hour_rollup_rows = rollup_hours(store, now_wall_ns)?;
+    let mut report = PruneReport {
+        host_rollup_rows: rollup_host(store, policy, now_wall_ns)?,
+        cgroup_rollup_rows: rollup_cgroups(store, policy, now_wall_ns)?,
+        hour_rollup_rows: rollup_hours(store, now_wall_ns)?,
+        ..Default::default()
+    };
 
     let raw_cutoff = now_wall_ns - (policy.raw_hours as i64) * HOUR_NS;
     let process_cutoff = now_wall_ns - (policy.process_raw_hours as i64) * HOUR_NS;
@@ -307,7 +308,7 @@ struct Acc {
 
 impl Acc {
     fn new(bucket: i64, entity_id: String, entity_kind: &'static str) -> Self {
-        Acc {
+        Self {
             bucket,
             entity_id,
             entity_kind,
@@ -336,7 +337,7 @@ impl Acc {
         self.cpu_usec = self.cpu_usec.saturating_add(cpu_usec);
     }
 
-    fn add_counters(&mut self, cpu_usec: u64) {
+    const fn add_counters(&mut self, cpu_usec: u64) {
         self.samples += 1;
         self.cpu_usec = self.cpu_usec.saturating_add(cpu_usec);
     }
@@ -350,11 +351,11 @@ impl Acc {
     }
 }
 
-fn bucket_of(wall_ns: i64, size_ns: i64) -> i64 {
+const fn bucket_of(wall_ns: i64, size_ns: i64) -> i64 {
     floor_div(wall_ns, size_ns).saturating_mul(size_ns)
 }
 
-fn floor_div(value: i64, divisor: i64) -> i64 {
+const fn floor_div(value: i64, divisor: i64) -> i64 {
     let quotient = value / divisor;
     if value % divisor < 0 && divisor > 0 {
         quotient - 1
@@ -383,6 +384,12 @@ fn set_meta(conn: &Connection, key: &str, value: i64) -> Result<()> {
     Ok(())
 }
 
+/// Map a `rusqlite` error into SARF's storage error.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "this is used as `map_err(storage)`; `map_err` hands the owned error to the \
+              mapper, so taking a reference would force a closure at every call site"
+)]
 fn storage(err: rusqlite::Error) -> Error {
     Error::Storage(format!("rollup row read: {err}"))
 }
@@ -457,16 +464,14 @@ fn rollup_host(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Result<
             };
             let bucket = bucket_of(current.wall, MINUTE_NS);
             let entity_id = format!("host:{}", current.boot);
-            let slot = match accumulators
-                .iter_mut()
-                .find(|acc| acc.bucket == bucket && acc.entity_id == entity_id)
-            {
-                Some(slot) => slot,
-                None => {
+            let index = accumulators
+                .iter()
+                .position(|acc| acc.bucket == bucket && acc.entity_id == entity_id)
+                .unwrap_or_else(|| {
                     accumulators.push(Acc::new(bucket, entity_id, "host"));
-                    accumulators.last_mut().expect("just pushed")
-                }
-            };
+                    accumulators.len() - 1
+                });
+            let slot = &mut accumulators[index];
             slot.add_interval(pct, cpu_usec);
             slot.add_memory(memory);
             slot.net_rx = slot.net_rx.saturating_add(
@@ -529,7 +534,7 @@ struct HostRaw {
 }
 
 impl HostRaw {
-    fn total(&self) -> u64 {
+    const fn total(&self) -> u64 {
         self.user
             .saturating_add(self.nice)
             .saturating_add(self.system)
@@ -540,7 +545,7 @@ impl HostRaw {
             .saturating_add(self.steal)
     }
 
-    fn busy(&self) -> u64 {
+    const fn busy(&self) -> u64 {
         self.total()
             .saturating_sub(self.idle)
             .saturating_sub(self.iowait)
@@ -592,16 +597,14 @@ fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Resu
             if let Some(cpu) = cpu {
                 let delta = cpu.saturating_sub(previous_cpu);
                 let bucket = bucket_of(wall, MINUTE_NS);
-                let slot = match accumulators
-                    .iter_mut()
-                    .find(|acc| acc.bucket == bucket && acc.entity_id == entity_id)
-                {
-                    Some(slot) => slot,
-                    None => {
+                let index = accumulators
+                    .iter()
+                    .position(|acc| acc.bucket == bucket && acc.entity_id == entity_id)
+                    .unwrap_or_else(|| {
                         accumulators.push(Acc::new(bucket, entity_id.clone(), "cgroup"));
-                        accumulators.last_mut().expect("just pushed")
-                    }
-                };
+                        accumulators.len() - 1
+                    });
+                let slot = &mut accumulators[index];
                 slot.add_counters(delta);
                 slot.add_memory(memory);
                 slot.io_read = slot
@@ -647,11 +650,11 @@ fn parse_io(json: Option<&str>) -> Vec<CgroupIoRaw> {
                 device: entry.get("device")?.as_str()?.to_string(),
                 read_bytes: entry
                     .get("read_bytes")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
                 write_bytes: entry
                     .get("write_bytes")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
             })
         })
@@ -668,8 +671,7 @@ fn delta_io(
         let before = previous
             .iter()
             .find(|candidate| candidate.device == entry.device)
-            .map(&field)
-            .unwrap_or(0);
+            .map_or(0, &field);
         total = total.saturating_add(field(entry).saturating_sub(before));
     }
     total
@@ -707,11 +709,10 @@ fn write_accs(store: &mut Store, accumulators: &[Acc]) -> Result<u64> {
             } else {
                 None
             };
-            let memory_avg = if acc.memory_count == 0 {
-                None
-            } else {
-                Some((acc.memory_sum / acc.memory_count) as i64)
-            };
+            let memory_avg = acc
+                .memory_sum
+                .checked_div(acc.memory_count)
+                .map(|avg| avg as i64);
             statement
                 .execute(params![
                     acc.bucket,
@@ -750,17 +751,16 @@ fn rollup_hours(store: &mut Store, now: i64) -> Result<u64> {
     let stored = store
         .meta_get("rollup_1h_through_ns")?
         .and_then(|value| value.parse::<i64>().ok());
-    let start = match stored {
-        Some(start) => start,
-        None => {
-            let oldest: Option<i64> = store
-                .connection()
-                .query_row("SELECT MIN(bucket_wall_ns) FROM rollup_1m", [], |row| {
-                    row.get(0)
-                })
-                .map_err(|err| Error::Storage(format!("hour rollup min: {err}")))?;
-            oldest.map(|value| bucket_of(value, HOUR_NS)).unwrap_or(end)
-        }
+    let start = if let Some(start) = stored {
+        start
+    } else {
+        let oldest: Option<i64> = store
+            .connection()
+            .query_row("SELECT MIN(bucket_wall_ns) FROM rollup_1m", [], |row| {
+                row.get(0)
+            })
+            .map_err(|err| Error::Storage(format!("hour rollup min: {err}")))?;
+        oldest.map_or(end, |value| bucket_of(value, HOUR_NS))
     };
     if start >= end {
         return Ok(0);
@@ -821,12 +821,10 @@ fn rollup_hour_range(store: &mut Store, start: i64, end: i64) -> Result<u64> {
             let net_rx: Option<i64> = row.get(11).map_err(storage)?;
             let net_tx: Option<i64> = row.get(12).map_err(storage)?;
             let bucket = bucket_of(minute, HOUR_NS);
-            let slot = match accumulators
-                .iter_mut()
-                .find(|acc| acc.bucket == bucket && acc.entity_id == entity_id)
-            {
-                Some(slot) => slot,
-                None => {
+            let index = accumulators
+                .iter()
+                .position(|acc| acc.bucket == bucket && acc.entity_id == entity_id)
+                .unwrap_or_else(|| {
                     accumulators.push(HourAcc {
                         bucket,
                         entity_id: entity_id.clone(),
@@ -844,12 +842,12 @@ fn rollup_hour_range(store: &mut Store, start: i64, end: i64) -> Result<u64> {
                         net_rx: 0,
                         net_tx: 0,
                     });
-                    accumulators.last_mut().expect("just pushed")
-                }
-            };
+                    accumulators.len() - 1
+                });
+            let slot = &mut accumulators[index];
             slot.samples = slot.samples.saturating_add(sample_count);
             if let Some(avg) = cpu_avg {
-                slot.cpu_weighted += avg * sample_count.max(1) as f64;
+                slot.cpu_weighted = avg.mul_add(sample_count.max(1) as f64, slot.cpu_weighted);
                 slot.cpu_weight = slot.cpu_weight.saturating_add(sample_count.max(1));
             }
             slot.cpu_max = slot.cpu_max.max(cpu_max.unwrap_or(0.0));
@@ -857,7 +855,8 @@ fn rollup_hour_range(store: &mut Store, start: i64, end: i64) -> Result<u64> {
                 .cpu_total
                 .saturating_add(cpu_total.unwrap_or(0).max(0) as u64);
             if let Some(avg) = memory_avg {
-                slot.memory_weighted += avg as f64 * sample_count.max(1) as f64;
+                slot.memory_weighted =
+                    (avg as f64).mul_add(sample_count.max(1) as f64, slot.memory_weighted);
                 slot.memory_weight = slot.memory_weight.saturating_add(sample_count.max(1));
             }
             slot.memory_max = slot.memory_max.max(memory_max.unwrap_or(0));
@@ -1095,7 +1094,7 @@ mod tests {
         let start = now - 20 * 60 * 1_000_000_000;
         let mut items = Vec::new();
         for step in 0..=18 {
-            let wall = start + step as i64 * 10_000_000_000;
+            let wall = start + i64::from(step) * 10_000_000_000;
             items.push(WriteItem::normal(WriteRecord::CgroupSample(CgroupSample {
                 stamps: stamps(wall, wall),
                 entity_id: "cgroup:1:2".into(),

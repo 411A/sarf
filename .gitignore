@@ -1,4 +1,6 @@
 /target
+/target/tmp
+/.tmp-test
 /_scratch
 **/*.rs.bk
 *.pdb
@@ -6,5 +8,6 @@
 *.db-wal
 *.db-shm
 /sarf-data
+/sarf-data-*
 /dist
 /bench-out

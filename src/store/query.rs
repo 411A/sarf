@@ -33,11 +33,11 @@ pub struct Window {
 
 impl Window {
     /// Create a window, normalizing inverted bounds.
-    pub fn new(since: i64, until: i64) -> Self {
+    pub const fn new(since: i64, until: i64) -> Self {
         if since <= until {
-            Window { since, until }
+            Self { since, until }
         } else {
-            Window {
+            Self {
                 since: until,
                 until: since,
             }
@@ -45,7 +45,7 @@ impl Window {
     }
 
     /// Window length in nanoseconds.
-    pub fn duration_ns(&self) -> i64 {
+    pub const fn duration_ns(&self) -> i64 {
         self.until.saturating_sub(self.since)
     }
 
@@ -55,7 +55,7 @@ impl Window {
     }
 
     /// Whether the window is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.until <= self.since
     }
 
@@ -265,7 +265,7 @@ pub struct LogFilter {
 impl LogFilter {
     /// Filter with a bounded default limit.
     pub fn new(window: Window) -> Self {
-        LogFilter {
+        Self {
             window: Some(window),
             limit: 200,
             ..Default::default()
@@ -287,7 +287,7 @@ pub struct EventFilter {
 }
 
 /// One process lifetime summary row.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LifetimeSummary {
     /// Process entity id.
     pub process_instance_id: String,
@@ -320,7 +320,7 @@ pub struct LifetimeSummary {
 }
 
 /// One daemon run summary.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RunSummary {
     /// Run id.
     pub run_id: i64,
@@ -337,7 +337,7 @@ pub struct RunSummary {
 }
 
 /// Collector health and coverage.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CollectorStatus {
     /// Parsed health record.
     pub health: CollectorHealth,
@@ -346,7 +346,7 @@ pub struct CollectorStatus {
 }
 
 /// Integration status row.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct IntegrationStatus {
     /// Integration id.
     pub integration_id: String,
@@ -365,7 +365,7 @@ pub struct IntegrationStatus {
 }
 
 /// Coverage gap row.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GapRow {
     /// Gap description.
     pub gap: CoverageGap,
@@ -374,7 +374,7 @@ pub struct GapRow {
 }
 
 /// Configured log source row.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LogSourceStatus {
     /// Source id.
     pub source_id: String,
@@ -435,7 +435,7 @@ pub fn host_mem_total(conn: &Connection, window: Window) -> Result<Option<u64>> 
 }
 
 /// Database summary for `sarf status`.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DbStats {
     /// Row counts by table name.
     pub counts: BTreeMap<String, i64>,
@@ -455,6 +455,12 @@ pub struct DbStats {
     pub architecture: Option<String>,
 }
 
+/// Map a `rusqlite` error into SARF's storage error.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "this is used as `map_err(db_err)`; `map_err` hands the owned error to the \
+              mapper, so taking a reference would force a closure at every call site"
+)]
 fn db_err(err: rusqlite::Error) -> Error {
     Error::Storage(format!("query failed: {err}"))
 }
@@ -695,14 +701,8 @@ pub fn host_usage(conn: &Connection, window: Window) -> Result<Option<EntityUsag
     } else {
         Some(mem_values.iter().sum::<u64>() / mem_values.len() as u64)
     };
-    let first_wall = points
-        .first()
-        .map(|point| point.wall_ns)
-        .unwrap_or(window.since);
-    let last_wall = points
-        .last()
-        .map(|point| point.wall_ns)
-        .unwrap_or(window.until);
+    let first_wall = points.first().map_or(window.since, |point| point.wall_ns);
+    let last_wall = points.last().map_or(window.until, |point| point.wall_ns);
     let covered_ns = last_wall.saturating_sub(first_wall).max(0);
     let net_rx: u64 = points
         .iter()
@@ -809,7 +809,7 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
                 .saturating_add(cpu_total.unwrap_or(0).max(0) as u64);
             if let Some(avg) = cpu_avg {
                 let weight = samples.max(1);
-                slot.cpu_avg_weighted += avg * weight as f64;
+                slot.cpu_avg_weighted = avg.mul_add(weight as f64, slot.cpu_avg_weighted);
                 slot.cpu_weight = slot.cpu_weight.saturating_add(weight);
             }
             if let Some(max) = cpu_max {
@@ -863,11 +863,7 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
             cpu_avg_pct,
             cpu_max_pct: acc.cpu_max,
             cpu_total_usec: Some(acc.cpu_total_usec),
-            memory_avg_bytes: if acc.memory_count == 0 {
-                None
-            } else {
-                Some(acc.memory_sum / acc.memory_count)
-            },
+            memory_avg_bytes: acc.memory_sum.checked_div(acc.memory_count),
             memory_max_bytes: acc.memory_max,
             io_read_bytes: Some(acc.io_read),
             io_write_bytes: Some(acc.io_write),
@@ -1070,11 +1066,7 @@ fn process_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> 
             cpu_avg_pct,
             cpu_max_pct: None,
             cpu_total_usec,
-            memory_avg_bytes: if acc.memory_count == 0 {
-                None
-            } else {
-                Some(acc.memory_sum / acc.memory_count)
-            },
+            memory_avg_bytes: acc.memory_sum.checked_div(acc.memory_count),
             memory_max_bytes: if acc.memory_max == 0 {
                 None
             } else {
@@ -1373,10 +1365,10 @@ pub fn buckets(
                 if wall > previous_wall {
                     let delta = ticks.saturating_sub(previous_ticks);
                     let cpu_usec = delta.saturating_mul(1_000_000) / hz.max(1);
-                    let name = cgroup_names
-                        .get(&entity_id)
-                        .map(|(name, _)| name.clone())
-                        .unwrap_or_else(|| entity_display_name(conn, &entity_id));
+                    let name = cgroup_names.get(&entity_id).map_or_else(
+                        || entity_display_name(conn, &entity_id),
+                        |(name, _)| name.clone(),
+                    );
                     merge_entity(
                         &mut entities,
                         BucketEntity {
@@ -1432,11 +1424,7 @@ pub fn buckets(
                     Some(host.cpu_sum / host.cpu_count as f64)
                 },
                 cpu_max_pct: host.cpu_max,
-                mem_used_avg: if host.mem_count == 0 {
-                    None
-                } else {
-                    Some(host.mem_sum / host.mem_count as u64)
-                },
+                mem_used_avg: host.mem_sum.checked_div(host.mem_count),
                 mem_used_max: host.mem_max,
                 psi_cpu_max: host.psi_cpu_max,
                 psi_memory_max: host.psi_memory_max,
@@ -1457,20 +1445,17 @@ pub fn buckets(
         .map(|(index, bucket)| (bucket.start_wall_ns, index))
         .collect();
     for ((start, _entity_id), entity) in entities {
-        let index = match by_start.get(&start) {
-            Some(index) => *index,
-            None => {
-                result.push(Bucket {
-                    start_wall_ns: start,
-                    end_wall_ns: start + bucket_ns,
-                    host: HostBucket::default(),
-                    entities: Vec::new(),
-                });
-                let index = result.len() - 1;
-                by_start.insert(start, index);
-                index
-            }
-        };
+        let index = by_start.get(&start).copied().unwrap_or_else(|| {
+            result.push(Bucket {
+                start_wall_ns: start,
+                end_wall_ns: start + bucket_ns,
+                host: HostBucket::default(),
+                entities: Vec::new(),
+            });
+            let index = result.len() - 1;
+            by_start.insert(start, index);
+            index
+        });
         result[index].entities.push(entity);
     }
     for bucket in &mut result {
@@ -1955,7 +1940,7 @@ pub fn meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
 /// Preferred window when the user did not specify one: the last hour of data.
 pub fn default_window(conn: &Connection) -> Result<Window> {
     let stats = db_stats(conn)?;
-    let until = stats.latest_wall_ns.map(|value| value + 1).unwrap_or(0);
+    let until = stats.latest_wall_ns.map_or(0, |value| value + 1);
     Ok(Window::new(until - 3_600_000_000_000, until))
 }
 
@@ -2048,9 +2033,11 @@ mod tests {
                     stable_key: "2:1".into(),
                     name: "/system.slice/docker-abcdef0123456789abcdef0123456789.scope".into(),
                     source: "cgroup_v2".into(),
-                    labels: [("container_id".to_string(), "abcdef0123456789".to_string())]
-                        .into_iter()
-                        .collect(),
+                    labels: std::iter::once((
+                        "container_id".to_string(),
+                        "abcdef0123456789".to_string(),
+                    ))
+                    .collect(),
                     first_seen_wall_ns: now,
                     last_seen_wall_ns: now,
                 })),

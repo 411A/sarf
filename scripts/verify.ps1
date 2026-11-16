@@ -14,7 +14,7 @@
     target when the MinGW gcc/ar used by libsqlite3-sys are available.
 
     tempfile-based tests need a temp directory that is not the user profile
-    temp, so this script creates <repo>/.tmp-test, points TEMP/TMP at it for the
+    temp, so this script creates <repo>/target/tmp, points TEMP/TMP at it for the
     test stages, and removes it in a finally block.
 
     The normal target directory is deliberately left alone (CARGO_TARGET_DIR is
@@ -40,8 +40,9 @@ $script:CurrentStage = ''
 $script:StartTime = Get-Date
 
 # Repo-local temp directory. Do not use the profile temp: tempfile-based tests
-# fail there on this Windows host.
-$TempRoot = Join-Path $RepoRoot '.tmp-test'
+# fail there on this Windows host, and .tmp-test under the repo root is rejected by
+# link.exe's temporary file creation. target/tmp is inside the build tree and works.
+$TempRoot = Join-Path $RepoRoot 'target/tmp'
 $OldTemp = $env:TEMP
 $OldTmp = $env:TMP
 
@@ -111,7 +112,7 @@ try {
     Invoke-CargoStage -Name 'cargo build --all-targets' `
         -Arguments @('--offline', 'build', '--all-targets')
 
-    # 2. Unit, policy and plan/spec tests. TEMP/TMP now point into .tmp-test.
+    # 2. Unit, policy and plan/spec tests. TEMP/TMP now point into target/tmp.
     Invoke-CargoStage -Name 'cargo test --lib' -Arguments @('--offline', 'test', '--lib')
     Invoke-CargoStage -Name 'cargo test --test policy' `
         -Arguments @('--offline', 'test', '--test', 'policy')

@@ -60,7 +60,10 @@ pub fn run_bounded(
         .stdout
         .take()
         .ok_or_else(|| Error::unavailable("external command", "stdout pipe unavailable"))?;
-    let reader = std::thread::spawn(move || read_bounded(stdout, max_bytes));
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let _ = sender.send(read_bounded(stdout, max_bytes));
+    });
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
     let status = loop {
@@ -80,15 +83,18 @@ pub fn run_bounded(
             }
         }
     };
-    let (bytes, truncated) = match reader.join() {
-        Ok(result) => result,
-        Err(_) => {
-            return Err(Error::unavailable(
-                "external command",
-                "output reader panicked",
-            ))
-        }
-    };
+    // A killed command can leave a grandchild holding the stdout pipe open. Never
+    // block the sampler on that: wait briefly, then detach the reader and report
+    // truncated output. Timeouts are bounded by construction.
+    let (bytes, truncated) = receiver
+        .recv_timeout(Duration::from_millis(500))
+        .map_or_else(
+            |_| (Vec::new(), true),
+            |result| {
+                let _ = reader.join();
+                result
+            },
+        );
     let success = status.is_some_and(|status| status.success());
     Ok(CommandOutput {
         status: status.and_then(|status| status.code()),
@@ -104,22 +110,20 @@ fn read_bounded(mut reader: impl std::io::Read, max_bytes: usize) -> (Vec<u8>, b
     let mut buffer = [0_u8; 8192];
     let mut truncated = false;
     loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => {
-                let remaining = max_bytes.saturating_sub(output.len());
-                if read > remaining {
-                    output.extend_from_slice(&buffer[..remaining]);
-                    truncated = true;
-                    break;
-                }
-                output.extend_from_slice(&buffer[..read]);
-                if output.len() >= max_bytes {
-                    truncated = true;
-                    break;
-                }
-            }
-            Err(_) => break,
+        let read = match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let remaining = max_bytes.saturating_sub(output.len());
+        if read > remaining {
+            output.extend_from_slice(&buffer[..remaining]);
+            truncated = true;
+            break;
+        }
+        output.extend_from_slice(&buffer[..read]);
+        if output.len() >= max_bytes {
+            truncated = true;
+            break;
         }
     }
     (output, truncated)

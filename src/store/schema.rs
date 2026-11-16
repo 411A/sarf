@@ -13,7 +13,7 @@
 pub const SCHEMA_VERSION: i64 = 1;
 
 /// Version-1 schema.
-pub const MIGRATION_1: &str = r#"
+pub const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -313,7 +313,7 @@ CREATE TABLE IF NOT EXISTS coverage_gaps (
     UNIQUE(source_id, kind, detail)
 );
 CREATE INDEX IF NOT EXISTS coverage_gaps_open ON coverage_gaps(resolved_wall_ns);
-"#;
+";
 
 #[cfg(test)]
 mod tests {

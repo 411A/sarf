@@ -21,7 +21,7 @@ use crate::model::{
 };
 use crate::time::WallNs;
 
-/// Linux USER_HZ for the process CPU tick counters.
+/// Linux `USER_HZ` for the process CPU tick counters.
 ///
 /// The kernel's userspace ABI defines `USER_HZ` as 100 on every supported 64-bit
 /// Linux architecture (the historical 1024 Alpha value is out of scope). SARF stores
@@ -29,6 +29,11 @@ use crate::time::WallNs;
 pub const CLOCK_TICKS_PER_SECOND: u64 = 100;
 
 /// Where a collector reads its pseudo-files from.
+#[allow(
+    clippy::struct_field_names,
+    reason = "the three fields mirror the pseudo-filesystems (/proc, /sys, cgroup) and \
+              the shared `_root` suffix is what makes each accessor unambiguous"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRoot {
     proc_root: PathBuf,
@@ -43,7 +48,7 @@ impl SourceRoot {
         let sys_root = PathBuf::from("/sys");
         let cgroup_root = procfs::read_optional(&proc_root.join("self/mountinfo"))
             .and_then(|text| procfs::parse_cgroup2_mount(&text));
-        SourceRoot {
+        Self {
             proc_root,
             sys_root,
             cgroup_root,
@@ -58,7 +63,7 @@ impl SourceRoot {
         let sys_root = root.join("sys");
         let candidate = sys_root.join("fs/cgroup");
         let cgroup_root = candidate.is_dir().then_some(candidate);
-        SourceRoot {
+        Self {
             proc_root,
             sys_root,
             cgroup_root,
@@ -138,19 +143,18 @@ impl HostFacts {
                     short_hash(root.proc_root().to_string_lossy().as_ref())
                 )
             });
-        let hostname = root
-            .read_proc_opt("sys/kernel/hostname")
-            .map(|text| text.trim().to_string())
-            .unwrap_or_else(|| {
+        let hostname = root.read_proc_opt("sys/kernel/hostname").map_or_else(
+            || {
                 std::env::var("HOSTNAME")
                     .or_else(|_| std::env::var("COMPUTERNAME"))
                     .unwrap_or_else(|_| "unknown-host".to_string())
-            });
+            },
+            |text| text.trim().to_string(),
+        );
         let kernel_release = root
             .read_proc_opt("sys/kernel/osrelease")
-            .map(|text| text.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        HostFacts {
+            .map_or_else(|| "unknown".to_string(), |text| text.trim().to_string());
+        Self {
             boot_id,
             hostname,
             kernel_release,
@@ -188,7 +192,7 @@ pub struct HealthRegistry {
 impl HealthRegistry {
     /// Create a registry and register the core collectors.
     pub fn new() -> Self {
-        let mut registry = HealthRegistry::default();
+        let mut registry = Self::default();
         for (id, configured) in [
             ("procfs", ConfiguredState::Enabled),
             ("cgroup_v2", ConfiguredState::Auto),
@@ -243,6 +247,7 @@ impl HealthRegistry {
         if let Some(entry) = self.entries.get_mut(id) {
             entry.last_success_wall_ns = Some(now_wall_ns);
             entry.availability = Availability::Available;
+            entry.permission = PermissionState::Permitted;
         }
     }
 
@@ -347,7 +352,7 @@ impl HealthRegistry {
 }
 
 /// Map an I/O error into availability for a collector.
-pub fn classify_error(error: &Error) -> (Availability, PermissionState) {
+pub const fn classify_error(error: &Error) -> (Availability, PermissionState) {
     match error {
         Error::PermissionDenied { .. } => (Availability::Partial, PermissionState::Denied),
         Error::Unavailable { .. } => (Availability::Unavailable, PermissionState::Unknown),
@@ -363,7 +368,7 @@ pub const fn sample_priority() -> WritePriority {
 
 impl From<&HostFacts> for crate::model::Entity {
     fn from(facts: &HostFacts) -> Self {
-        crate::model::Entity {
+        Self {
             entity_id: format!("host:{}", facts.short_boot_id()),
             kind: crate::model::EntityKind::Host,
             stable_key: facts.boot_id.clone(),

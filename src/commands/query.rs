@@ -75,8 +75,7 @@ pub fn top(context: &Context, since: &str, by: ByMetric, limit: usize) -> Result
                 )),
                 entry
                     .share_pct
-                    .map(|share| format!("{share:.1}%"))
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), |share| format!("{share:.1}%")),
             ]
         })
         .collect();
@@ -287,15 +286,16 @@ fn print_tree_node(nodes: &[TreeNode], node: &TreeNode, depth: usize) {
     if depth > 64 {
         return;
     }
+    use std::fmt::Write as _;
     let mut suffix = String::new();
     if let Some(tool) = &node.tool {
-        suffix.push_str(&format!(" [{tool}]"));
+        let _ = write!(suffix, " [{tool}]");
     }
     if let Some(container) = &node.container {
-        suffix.push_str(&format!(" [container {container}]"));
+        let _ = write!(suffix, " [container {container}]");
     }
     if let Some(session) = &node.session {
-        suffix.push_str(&format!(" [{session}]"));
+        let _ = write!(suffix, " [{session}]");
     }
     println!(
         "{}{} ({}·{}){}",
@@ -366,8 +366,7 @@ pub fn why(context: &Context, since: &str, limit: usize, metric: Option<&str>) -
                     window.metric.format_value(contributor.value),
                     contributor
                         .share_pct
-                        .map(|share| format!("{share:.1}%"))
-                        .unwrap_or_else(|| "-".to_string()),
+                        .map_or_else(|| "-".to_string(), |share| format!("{share:.1}%")),
                 ]
             })
             .collect();
@@ -400,8 +399,7 @@ pub fn incidents(context: &Context, since: &str, limit: usize) -> Result<i32> {
                 fmt_time(incident.started_wall_ns),
                 incident
                     .ended_wall_ns
-                    .map(fmt_time)
-                    .unwrap_or_else(|| "open".to_string()),
+                    .map_or_else(|| "open".to_string(), fmt_time),
                 incident
                     .entity_id
                     .clone()
@@ -470,8 +468,7 @@ pub fn show(context: &Context, incident_id: i64) -> Result<i32> {
         fmt_time(incident.started_wall_ns),
         incident
             .ended_wall_ns
-            .map(fmt_time)
-            .unwrap_or_else(|| "open".to_string()),
+            .map_or_else(|| "open".to_string(), fmt_time),
         incident.peak,
         incident.baseline,
         incident.evidence_loss
@@ -504,7 +501,7 @@ pub fn show(context: &Context, incident_id: i64) -> Result<i32> {
             "{} {:<14} {:<8} {}",
             fmt_time(record.wall_ns),
             record.source_id,
-            record.level.map(Severity::as_str).unwrap_or("-"),
+            record.level.map_or("-", Severity::as_str),
             record.message
         );
     }
@@ -550,11 +547,7 @@ pub fn logs(
             vec![
                 fmt_time(record.wall_ns),
                 record.source_id.clone(),
-                record
-                    .level
-                    .map(Severity::as_str)
-                    .unwrap_or("-")
-                    .to_string(),
+                record.level.map_or("-", Severity::as_str).to_string(),
                 record.message.clone(),
             ]
         })
@@ -570,14 +563,14 @@ trait MetricDisplay {
 impl MetricDisplay for Metric {
     fn format_value(self, value: f64) -> String {
         match self {
-            Metric::Cpu | Metric::PsiCpu | Metric::PsiMemory | Metric::PsiIo => {
+            Self::Cpu | Self::PsiCpu | Self::PsiMemory | Self::PsiIo => {
                 format!("{value:.1}% of one core")
             }
-            Metric::Memory => fmt_bytes(Some(value.max(0.0) as u64)),
-            Metric::IoRead | Metric::IoWrite | Metric::NetRx | Metric::NetTx => {
+            Self::Memory => fmt_bytes(Some(value.max(0.0) as u64)),
+            Self::IoRead | Self::IoWrite | Self::NetRx | Self::NetTx => {
                 fmt_bytes(Some(value.max(0.0) as u64))
             }
-            Metric::Load => format!("{value:.2} load"),
+            Self::Load => format!("{value:.2} load"),
         }
     }
 }

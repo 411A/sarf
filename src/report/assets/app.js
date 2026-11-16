@@ -18,15 +18,21 @@
   var MONO = 'ui-monospace, "SFMono-Regular", "Cascadia Code", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace';
 
   var METRIC_LABELS = {
+    cpu: 'CPU utilization',
     cpu_pct: 'CPU utilization',
     host_cpu_pct: 'CPU utilization',
     mem_pct: 'Memory utilization',
     memory_pct: 'Memory utilization',
-    memory: 'Memory utilization',
+    memory: 'Memory usage',
     psi_cpu: 'CPU pressure',
     psi_memory: 'Memory pressure',
     psi_io: 'I/O pressure',
+    load: 'Load average (1m)',
     load1: 'Load average (1m)',
+    io_read: 'Disk read bytes',
+    io_write: 'Disk write bytes',
+    net_rx: 'Network receive bytes',
+    net_tx: 'Network transmit bytes',
     net_rx_bps: 'Network receive rate',
     net_tx_bps: 'Network transmit rate',
     disk_read_bps: 'Disk read rate',
@@ -221,15 +227,6 @@
     return span;
   }
 
-  function valueNode(value, className) {
-    if (value === null || value === undefined) return dashSpan();
-    return el('span', className || '', String(value));
-  }
-
-  function setText(node, value) {
-    if (node) node.textContent = textValue(value);
-  }
-
   function safe(label, fn, target) {
     try {
       fn();
@@ -420,7 +417,7 @@
 
   function fmtTick(ns, spanNs) {
     if (!toDate(ns)) return null;
-    if (isNum(spanNs) && spanNs > 86400000000000) return fmtDay(ns);
+    if (isNum(spanNs) && spanNs >= 86400000000000) return fmtDay(ns);
     return fmtHour(ns);
   }
 
@@ -439,9 +436,19 @@
     var name = String(metric || '').toLowerCase();
     if (!name) return 'number';
     if (/(^|_)bps$/.test(name) || name.indexOf('bytes_per_sec') !== -1 || name.indexOf('_rate') !== -1) return 'rate';
+    if (name === 'memory' || name === 'io_read' || name === 'io_write' || name === 'net_rx' || name === 'net_tx') return 'bytes';
     if (name.indexOf('bytes') !== -1 || /(^|_)bytes?$/.test(name)) return 'bytes';
-    if (name.indexOf('pct') !== -1 || name.indexOf('percent') !== -1 || name.indexOf('psi_') === 0 || name === 'cpu' || name === 'memory' || name === 'mem') return 'pct';
+    if (name.indexOf('pct') !== -1 || name.indexOf('percent') !== -1 || name.indexOf('psi_') === 0 || name === 'cpu' || name === 'mem') return 'pct';
+    if (name === 'load' || name === 'load1') return 'number';
     return 'number';
+  }
+
+  function contributorMetricFormat(windowMetric) {
+    var name = String(windowMetric || '').toLowerCase();
+    if (name === 'memory' || name === 'psi_memory' || name === 'io_read' || name === 'io_write' || name === 'net_rx' || name === 'net_tx') {
+      return 'bytes';
+    }
+    return 'cpu';
   }
 
   function formatMetricValue(metric, value) {
@@ -482,9 +489,9 @@
   function statusTone(value) {
     var text = String(value === null || value === undefined ? '' : value).trim().toLowerCase();
     if (!text) return 'neutral';
-    if (/^(ok|available|yes|true|enabled|detected|running|active|healthy|success|configured|present)$/.test(text)) return 'ok';
+    if (/^(ok|available|yes|true|enabled|detected|running|active|healthy|success|configured|permitted|present)$/.test(text)) return 'ok';
     if (/(denied|forbidden|error|failed|failure|critical|panic|fatal)/.test(text)) return 'danger';
-    if (/(partial|degraded|unknown|not configured|disabled|unavailable|missing|not available|not detected|^no$|^false$)/.test(text)) return 'warn';
+    if (/(partial|degraded|unknown|not configured|disabled|unavailable|missing|not available|not detected|not_detected|^no$|^false$)/.test(text)) return 'warn';
     return 'info';
   }
 
@@ -577,12 +584,6 @@
   function unavailableState(title, text) {
     var box = makeEmpty(title, text, '!');
     box.className = 'unavailable-state';
-    return box;
-  }
-
-  function errorState(title, text) {
-    var box = makeEmpty(title, text, '!');
-    box.className = 'error-state';
     return box;
   }
 
@@ -757,16 +758,18 @@
   function setFooter(payload) {
     var footer = $('footer-meta');
     if (!footer) return;
-    var parts = [];
-    if (payload) {
-      var meta = asObject(def(payload, 'meta', null), {});
-      var product = nonEmptyString(def(meta, 'product', null)) || 'SARF';
-      var version = nonEmptyString(def(meta, 'version', null));
-      parts.push(product + (version ? ' ' + version : ''));
-      var generated = fmtStamp(def(meta, 'generated', null));
-      if (generated) parts.push('Generated ' + generated);
-      if (state.tz) parts.push(state.tz);
+    if (!payload) {
+      footer.textContent = 'Payload unavailable \u00b7 No observations rendered \u00b7 No network access';
+      return;
     }
+    var parts = [];
+    var meta = asObject(def(payload, 'meta', null), {});
+    var product = nonEmptyString(def(meta, 'product', null)) || 'SARF';
+    var version = nonEmptyString(def(meta, 'version', null));
+    parts.push(product + (version ? ' ' + version : ''));
+    var generated = fmtStamp(def(meta, 'generated', null));
+    if (generated) parts.push('Generated ' + generated);
+    if (state.tz) parts.push(state.tz);
     parts.push('Rendered locally from embedded JSON; no network access');
     footer.textContent = parts.join(' \u00b7 ');
   }
@@ -896,12 +899,22 @@
         } catch (error) {
           activePanel.scrollIntoView();
         }
+        try {
+          activePanel.focus({ preventScroll: true });
+        } catch (error) {
+          activePanel.focus();
+        }
       }
     }
     if (normalized === 'timeline') {
+      try {
+        resizeAllCharts(true);
+      } catch (error) {
+        // A later animation frame and ResizeObserver retry the layout.
+      }
       window.requestAnimationFrame(function () {
         window.requestAnimationFrame(function () {
-          resizeAllCharts();
+          resizeAllCharts(true);
         });
       });
     } else if (state.hoverIndex !== null) {
@@ -911,7 +924,9 @@
 
   function setupPrint() {
     window.addEventListener('beforeprint', function () {
-      state.printTheme = document.documentElement.getAttribute('data-theme');
+      if (state.printTheme === null) {
+        state.printTheme = document.documentElement.getAttribute('data-theme');
+      }
       document.body.classList.add('printing');
       if (state.printTheme === 'dark') {
         document.documentElement.setAttribute('data-theme', 'light');
@@ -1067,6 +1082,11 @@
     row.appendChild(chip);
     row.appendChild(el('span', 'aside-label', 'Coverage status'));
     target.appendChild(row);
+    updateNavCoverage();
+  }
+
+  function updateNavCoverage() {
+    var status = coverageStatusText();
     setStatusChip($('nav-coverage'), 'Coverage ' + (status === null ? DASH : status), coverageTone(status));
   }
 
@@ -1094,6 +1114,13 @@
     card.appendChild(el('p', 'kpi-sub', text));
   }
 
+  function countOrFallback(summaryKey, fallback) {
+    var value = numOrNull(def(state.summary, summaryKey, null));
+    if (value !== null && value > 0) return value;
+    if (isNum(fallback)) return fallback;
+    return value;
+  }
+
   function renderKpis() {
     var target = $('summary-kpis');
     if (!target) return;
@@ -1103,9 +1130,17 @@
     var max = numOrNull(def(summary, 'host_cpu_max_pct', null));
     var memPeak = numOrNull(def(summary, 'host_mem_used_max_bytes', null));
     var memTotal = numOrNull(def(summary, 'host_mem_total_bytes', null));
-    var incidentCount = numOrNull(def(summary, 'incident_count', null));
-    var windowCount = numOrNull(def(summary, 'window_count', null));
-    var processCount = numOrNull(def(summary, 'process_count', null));
+    var windowsArray = asArray(def(state.data, 'windows', null), null);
+    var incidentsArray = asArray(def(state.data, 'incidents', null), null);
+    var processObject = asObject(def(state.data, 'processes', null), null);
+    var processNodes = processObject ? asArray(def(processObject, 'nodes', null), []) : null;
+    var processTotal = processObject ? numOrNull(def(processObject, 'total', null)) : null;
+    var incidentCount = countOrFallback('incident_count', incidentsArray === null ? null : incidentsArray.length);
+    var windowCount = countOrFallback('window_count', windowsArray === null ? null : windowsArray.length);
+    var processCount = countOrFallback(
+      'process_count',
+      processTotal !== null && processTotal > 0 ? processTotal : (processNodes === null ? null : processNodes.length)
+    );
     var logCount = numOrNull(def(summary, 'log_count', null));
     var eventCount = numOrNull(def(summary, 'event_count', null));
 
@@ -1212,7 +1247,7 @@
       degraded: 'Coverage is materially reduced. Absence of activity in this report should not be read as absence on the host.',
       neutral: 'Coverage status was not reported. Treat the report as incomplete until the collector ledger is reviewed.'
     };
-    var statusKey = status === null ? 'neutral' : String(status).toLowerCase();
+    var statusKey = status === null ? 'neutral' : String(status).trim().toLowerCase();
     if (!descriptions[statusKey]) statusKey = 'neutral';
     target.appendChild(el('p', 'health-copy', descriptions[statusKey]));
 
@@ -1403,7 +1438,8 @@
     head.appendChild(el('h4', '', 'Ranked contributors'));
     var raw = def(window, 'contributors', null);
     var countLabel = Array.isArray(raw) ? raw.length : null;
-    head.appendChild(el('span', '', countLabel === null ? 'unavailable' : fmtCount(countLabel) + ' recorded'));
+    var basis = contributorMetricFormat(metric) === 'bytes' ? 'memory bytes' : 'CPU % of one core';
+    head.appendChild(el('span', '', 'ranked by ' + basis + ' \u00b7 ' + (countLabel === null ? 'unavailable' : fmtCount(countLabel) + ' recorded')));
     section.appendChild(head);
 
     if (!Array.isArray(raw)) {
@@ -1440,7 +1476,7 @@
       top.appendChild(heading);
 
       var figures = el('div', 'contributor-figures');
-      var valueText = formatMetricValue(metric, value);
+      var valueText = formatMetricValue(contributorMetricFormat(metric), value);
       figures.appendChild(el('span', 'contributor-value', valueText === null ? DASH : valueText));
       figures.appendChild(el('span', 'contributor-share', share === null ? 'share ' + DASH : 'share ' + fmtPct(share)));
       top.appendChild(figures);
@@ -1456,6 +1492,7 @@
 
       if (Array.isArray(evidence) && evidence.length) {
         card.appendChild(evidenceList(evidence, 8));
+        if (evidence.length > 8) card.appendChild(el('p', 'render-note', 'Showing 8 of ' + fmtCount(evidence.length) + ' evidence bullets.'));
       } else if (Array.isArray(evidence)) {
         card.appendChild(el('p', 'inline-empty', 'No evidence bullets recorded.'));
       } else {
@@ -1772,6 +1809,7 @@
         else chart.visible.add(series.key);
         var pressed = chart.visible.has(series.key);
         button.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+        updateChartFoot(chart);
         updateChartOverlay(chart);
         if (chart.layout) {
           drawChartBase(chart);
@@ -1793,8 +1831,18 @@
     card.appendChild(plot);
     card.appendChild(foot);
     wireChart(chart);
+    updateChartFoot(chart);
     updateChartOverlay(chart);
     return chart;
+  }
+
+  function updateChartFoot(chart) {
+    if (!chart.foot) return;
+    var hidden = chart.series.filter(function (series) {
+      return !chart.visible.has(series.key);
+    }).length;
+    chart.foot.textContent = fmtCount(chart.times.length) + ' samples' +
+      (hidden ? ' \u00b7 ' + hidden + ' series hidden' : '');
   }
 
   function wireChart(chart) {
@@ -2542,7 +2590,8 @@
     ];
     var table = buildTable(columns, metric.caption);
     var tbody = table.tbody;
-    rows.slice(0, TOP_CAP).forEach(function (entity, index) {
+    var listed = rows.slice(0, TOP_CAP);
+    listed.forEach(function (entity, index) {
       if (!entity || typeof entity !== 'object') return;
       var row = el('tr');
       tableCell(row, pad2(index + 1), 'num');
@@ -2582,7 +2631,7 @@
         { label: 'rx', value: fmtBytes(numOrNull(def(entity, 'net_rx_bytes', null))) },
         { label: 'tx', value: fmtBytes(numOrNull(def(entity, 'net_tx_bytes', null))) }
       ], 'num');
-      var share = usageShare(metric.key, entity, rows);
+      var share = usageShare(metric.key, entity, listed);
       valueCell(row, share === null ? null : fmtPct(share), 'num');
       tbody.appendChild(row);
     });
@@ -2950,6 +2999,7 @@
 
     var note = [];
     note.push('Showing ' + fmtCount(rendered.count) + ' of ' + fmtCount(state.processIncluded) + (query ? ' matching ' : ' ') + 'process nodes.');
+    if (query) note.push('Filter "' + state.processQuery.trim() + '".');
     if (query) note.push(fmtCount(state.processMatches) + ' direct match' + (state.processMatches === 1 ? '' : 'es') + '.');
     if (state.processTotal > state.processNodes.length) {
       note.push('Embedded sample: ' + fmtCount(state.processNodes.length) + ' of ' + fmtCount(state.processTotal) + ' observed processes.');
@@ -3055,7 +3105,7 @@
     view.appendChild(wrap);
     var shown = Math.min(nodes.length, TREE_CAP);
     var note = 'Showing ' + fmtCount(shown) + ' of ' + fmtCount(state.processIncluded) + (query ? ' matching ' : ' ') + 'process nodes in a flat list (parent links unavailable).';
-    if (query) note += ' ' + fmtCount(matches) + ' direct matches.';
+    if (query) note += ' Filter "' + state.processQuery.trim() + '". ' + fmtCount(matches) + ' direct matches.';
     if (state.processTotal > state.processNodes.length) note += ' Embedded sample: ' + fmtCount(state.processNodes.length) + ' of ' + fmtCount(state.processTotal) + ' observed processes.';
     setProcessNote(note);
     state.processRendered = shown;
@@ -3079,7 +3129,8 @@
     var incidents = raw.filter(function (incident) {
       return incident && typeof incident === 'object';
     });
-    setAside($('incidents-count'), fmtCount(incidents.length), 'incidents');
+    setAside($('incidents-count'), fmtCount(incidents.length), 'incidents',
+      incidents.length > INCIDENT_CAP ? 'showing ' + fmtCount(INCIDENT_CAP) : null);
     setTabCount('tab-count-incidents', incidents.length);
     if (incidents.length === 0) {
       wrap.appendChild(makeEmpty('No incidents recorded', 'The incident register is empty for this report window. This is a recorded empty register, not proof that no anomaly occurred.'));
@@ -3138,10 +3189,7 @@
       });
       table.tbody.appendChild(row);
     });
-    var tableWrap = el('div', 'table-scroll');
-    tableWrap.appendChild(table.table);
-    wrap.appendChild(tableWrap);
-    appendBoundedNote(wrap, Math.min(incidents.length, INCIDENT_CAP), incidents.length, 'incidents');
+    wrap.appendChild(table.table);
   }
 
   function incidentEntityCell(entityId) {
@@ -3190,6 +3238,11 @@
           context.scrollIntoView({ behavior: 'auto', block: 'center' });
         } catch (error) {
           context.scrollIntoView();
+        }
+        try {
+          context.focus({ preventScroll: true });
+        } catch (error) {
+          context.focus();
         }
       }
     });
@@ -3384,13 +3437,13 @@
     noteParts.push('Showing first ' + fmtCount(displayed.length) + ' of ' + fmtCount(filtered.length) + ' matching log entries.');
     if (filtered.length > LOG_CAP) noteParts.push('Display cap ' + fmtCount(LOG_CAP) + '.');
     if (summaryCount !== null && summaryCount > logs.length) noteParts.push('Embedded sample: ' + fmtCount(logs.length) + ' of ' + fmtCount(summaryCount) + ' stored entries.');
-    if (state.incidentFilter) noteParts.push('Incident filter active.');
+    var filterLabels = [];
+    if (state.logFilters.query.trim()) filterLabels.push('text "' + state.logFilters.query.trim() + '"');
+    if (state.logFilters.level !== 'all') filterLabels.push('level ' + state.logFilters.level);
+    if (state.logFilters.source !== 'all') filterLabels.push('source ' + state.logFilters.source);
+    if (state.incidentFilter) filterLabels.push('incident ' + (state.incidentFilter.id === null ? 'filter' : '#' + state.incidentFilter.id));
+    if (filterLabels.length) noteParts.push('Active filters: ' + filterLabels.join(', ') + '.');
     if (note) note.textContent = noteParts.join(' ');
-  }
-
-  function sameEntity(a, b) {
-    if (a === null || b === null) return false;
-    return String(a) === String(b);
   }
 
   function renderLogContext() {
@@ -3404,6 +3457,7 @@
     var filter = state.incidentFilter;
     banner.hidden = false;
     banner.setAttribute('role', 'status');
+    banner.setAttribute('tabindex', '-1');
     var text = el('span', 'context-text');
     text.appendChild(document.createTextNode('Incident filter \u00b7 '));
     text.appendChild(el('strong', '', filter.id === null ? 'unknown ID' : '#' + filter.id));
@@ -3508,6 +3562,7 @@
     renderCollectors(collectors);
     renderGaps(gaps);
     renderIntegrations(integrations);
+    updateNavCoverage();
   }
 
   function renderCollectors(collectors) {

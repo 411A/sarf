@@ -94,7 +94,7 @@ struct Enrichment {
 
 impl Default for Enrichment {
     fn default() -> Self {
-        Enrichment {
+        Self {
             containers: HashMap::new(),
             container_names: HashMap::new(),
             sessions: SessionDiscovery::default(),
@@ -113,7 +113,7 @@ struct AnalysisState {
 
 impl AnalysisState {
     fn new() -> Self {
-        AnalysisState {
+        Self {
             ewas: HashMap::new(),
             previous_host: None,
             previous_cgroups: HashMap::new(),
@@ -275,6 +275,15 @@ fn host_cpu_pct(previous: &HostSample, current: &HostSample, cpu_count: usize) -
 }
 
 /// Run the daemon.
+///
+/// `options` is owned by the daemon for the whole run: it is built once by the
+/// caller from the CLI and never shared, so taking it by value avoids borrowing a
+/// temporary configuration tree.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "DaemonOptions is the entry point's owned configuration; callers build it \
+              per run and the daemon keeps it for the process lifetime"
+)]
 pub fn run(options: DaemonOptions) -> Result<RunReport> {
     let started = Instant::now();
     options.data_dir.init(false)?;
@@ -297,13 +306,18 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         }
         None => SourceRoot::real(),
     };
-    if !base_root.has_procfs() {
+    let fact_root = if base_root.has_procfs() {
+        base_root.clone()
+    } else {
+        cycle_root(&base_root, 0)
+    };
+    if !fact_root.has_procfs() {
         return Err(Error::unavailable(
             "/proc",
             "no procfs at this path; Linux is required (use --fixture-root for replay)",
         ));
     }
-    let facts = HostFacts::read(&base_root);
+    let facts = HostFacts::read(&fact_root);
     let host_id = format!("host:{}", facts.short_boot_id());
 
     let clock: Arc<dyn Clock> = if simulated {
@@ -320,7 +334,7 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
 
     let mut store = Store::open(&options.data_dir.db_path())?;
     store.migrate()?;
-    init_meta(&mut store, &facts, &base_root)?;
+    init_meta(&mut store, &facts, &fact_root)?;
     let first_wall = clock.wall_ns();
     let host_entity = Entity {
         entity_id: host_id.clone(),
@@ -386,19 +400,19 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         catalog.clone(),
     );
     let mut enrichment = Enrichment::default();
-    let mut writer = Writer::spawn(store, 4096)?;
+    let writer = Writer::spawn(store, 4096)?;
 
-    probe_coverage(&base_root, &mut health, &mut writer, first_wall);
+    probe_coverage(&fact_root, &mut health, &writer, first_wall);
 
     let mut report = RunReport {
         run_id,
         simulated,
         ..RunReport::default()
     };
-    let cgroup_ratio = ratio(interval_secs, options.config.cgroup.sample_secs);
-    let process_ratio = ratio(interval_secs, options.config.general.process_interval_secs);
-    let discovery_ratio = ratio(interval_secs, options.config.general.discovery_secs);
-    let prune_ratio = ratio(interval_secs, options.config.general.prune_interval_secs);
+    let mut last_cgroup_mono: i64 = i64::MIN / 2;
+    let mut last_process_mono: i64 = i64::MIN / 2;
+    let mut last_discovery_mono: i64 = i64::MIN / 2;
+    let mut last_prune_mono: i64 = i64::MIN / 2;
     let mut cgroup_map: HashMap<String, String> = HashMap::new();
     let mut observed_tools: HashSet<String> = HashSet::new();
     let mut cycle: u64 = 0;
@@ -423,7 +437,29 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
             }));
         }
 
-        if cycle % discovery_ratio == 0 {
+        let sample_discovery = due(
+            &mut last_discovery_mono,
+            stamps.mono,
+            options.config.general.discovery_secs,
+        );
+        let sample_cgroup = options.config.cgroup.enabled
+            && due(
+                &mut last_cgroup_mono,
+                stamps.mono,
+                options.config.cgroup.sample_secs,
+            );
+        let sample_process = options.config.process.enabled
+            && due(
+                &mut last_process_mono,
+                stamps.mono,
+                options.config.general.process_interval_secs,
+            );
+        let run_prune = due(
+            &mut last_prune_mono,
+            stamps.mono,
+            options.config.general.prune_interval_secs,
+        );
+        if sample_discovery {
             enrichment.last_cycle = cycle;
             enrich(
                 &mut enrichment,
@@ -437,7 +473,7 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
             apply_session_map(&mut process_collector, &enrichment);
         }
 
-        let cgroup_cycle = if options.config.cgroup.enabled && cycle % cgroup_ratio == 0 {
+        let cgroup_cycle = if sample_cgroup {
             match CgroupCollector::new(root.clone(), options.config.cgroup.max_cgroups)
                 .sample(&stamps)
             {
@@ -481,7 +517,7 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
             None
         };
 
-        if options.config.process.enabled && cycle % process_ratio == 0 {
+        if sample_process {
             let timing = crate::collect::process::HostTiming {
                 uptime_secs: host.uptime_secs,
                 boot_time_secs: host.boot_time_secs,
@@ -549,10 +585,10 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         let pulse = engine.tick(stamps.wall);
         enqueue_incidents(&mut batch, pulse, &logs, &stamps, &mut report);
 
-        if cycle % prune_ratio == 0 && cycle > 0 {
-            prune(&options, &mut writer, stamps.wall, &mut health);
+        if run_prune && cycle > 0 {
+            prune(&options, &writer, stamps.wall, &mut health);
         }
-        if cycle % discovery_ratio == 0 {
+        if sample_discovery {
             batch.extend(health.write_items());
         }
 
@@ -580,7 +616,8 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
     }
 
     // Final rollups/retention so a bounded run produces reportable aggregates.
-    prune(&options, &mut writer, clock.wall_ns(), &mut health);
+    prune(&options, &writer, clock.wall_ns(), &mut health);
+    health.success("writer", clock.wall_ns());
     writer.submit(health.write_items());
     writer.flush()?;
     let writer_stats = writer.stats();
@@ -595,15 +632,21 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
     Ok(report)
 }
 
-fn ratio(base_secs: u64, desired_secs: u64) -> u64 {
-    if base_secs == 0 {
-        return 1;
+fn due(last: &mut i64, now: i64, interval_secs: u64) -> bool {
+    let interval = (interval_secs.max(1) as i64).saturating_mul(1_000_000_000);
+    if now.saturating_sub(*last) >= interval {
+        *last = now;
+        true
+    } else {
+        false
     }
-    (base_secs / desired_secs.max(1)).max(1)
 }
 
 fn cycle_root(base: &SourceRoot, cycle: u64) -> SourceRoot {
-    let root = base.proc_root().parent().unwrap_or(base.proc_root());
+    let root = base
+        .proc_root()
+        .parent()
+        .unwrap_or_else(|| base.proc_root());
     let candidate = root.join(format!("cycle-{cycle:04}"));
     if candidate.join("proc").is_dir() {
         SourceRoot::fixture(candidate)
@@ -689,7 +732,7 @@ fn apply_docker_labels(cycle: &mut CgroupCycle, containers: &HashMap<String, Con
             .unwrap_or_else(|| format!("/{}", entity.name));
         if let Some(id) = catalog::container_from_cgroup(&path) {
             if let Some(container) = containers.get(&id) {
-                entity.name = container.name.clone();
+                entity.name.clone_from(&container.name);
                 entity
                     .labels
                     .insert("container_id".to_string(), container.short_id.clone());
@@ -803,7 +846,7 @@ fn enqueue_logs(
         health.register(&id, ConfiguredState::Auto);
         if let Some(entry) = health.entry(&id) {
             entry.availability = source.availability;
-            entry.last_error = source.last_error.clone();
+            entry.last_error.clone_from(&source.last_error);
             entry.received_count = source.received;
             entry.dropped_count = source.dropped;
             entry.truncated_count = source.truncated;
@@ -820,7 +863,7 @@ fn enqueue_logs(
     }
     for record in &pulse.records {
         let priority = match record.level {
-            Some(Severity::Critical) | Some(Severity::Error) => WritePriority::Critical,
+            Some(Severity::Critical | Severity::Error) => WritePriority::Critical,
             Some(Severity::Warn) => WritePriority::Normal,
             _ => WritePriority::Low,
         };
@@ -1041,8 +1084,11 @@ fn enrich(
         )));
         if detected == Availability::Available {
             health.success(id, stamps.wall);
-        } else {
-            health.unavailable(id, "not observed in this run");
+        } else if let Some(entry) = health.entry(id) {
+            // Absence of a process is unknown coverage, not proof of an unavailable
+            // integration (it may simply be idle or not started yet).
+            entry.availability = Availability::Unknown;
+            entry.last_error = Some("not observed in this run".to_string());
         }
     }
 }
@@ -1056,10 +1102,10 @@ fn integration_row(
     error: Option<String>,
     now: WallNs,
 ) -> IntegrationStateRow {
-    let capabilities = catalog
-        .get(id)
-        .map(|tool| serde_json::to_string(&tool.capabilities).unwrap_or_else(|_| "[]".into()))
-        .unwrap_or_else(|| "[]".to_string());
+    let capabilities = catalog.get(id).map_or_else(
+        || "[]".to_string(),
+        |tool| serde_json::to_string(&tool.capabilities).unwrap_or_else(|_| "[]".into()),
+    );
     IntegrationStateRow {
         integration_id: id.to_string(),
         configured_state: toggle.as_str().to_string(),
@@ -1081,7 +1127,7 @@ fn apply_session_map(collector: &mut ProcessCollector, enrichment: &Enrichment) 
 
 fn prune(
     options: &DaemonOptions,
-    writer: &mut Writer,
+    writer: &Writer,
     now_wall_ns: WallNs,
     health: &mut HealthRegistry,
 ) {
@@ -1096,6 +1142,7 @@ fn prune(
         crate::store::retention::prune(&mut store, &policy, now_wall_ns, options.data_dir.root())
     }) {
         Ok(report) => {
+            health.success("retention", now_wall_ns);
             health.coverage(
                 "retention",
                 json!({
@@ -1135,11 +1182,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ratio_is_at_least_one() {
-        assert_eq!(ratio(5, 5), 1);
-        assert_eq!(ratio(30, 5), 6);
-        assert_eq!(ratio(1, 5), 1);
-        assert_eq!(ratio(0, 5), 1);
+    fn cadence_due_is_at_least_one_interval() {
+        let mut last = i64::MIN / 2;
+        assert!(due(&mut last, 1_000_000_000, 5));
+        assert!(!due(&mut last, 2_000_000_000, 5));
+        assert!(due(&mut last, 6_000_000_000, 5));
+        assert!(due(&mut last, 7_000_000_000, 1));
     }
 
     #[test]

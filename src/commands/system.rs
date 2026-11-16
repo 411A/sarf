@@ -30,7 +30,7 @@ struct Check {
 
 impl Check {
     fn new(name: impl Into<String>, state: impl Into<String>, detail: impl Into<String>) -> Self {
-        Check {
+        Self {
             name: name.into(),
             state: state.into(),
             detail: detail.into(),
@@ -229,9 +229,10 @@ pub fn doctor(context: &Context) -> Result<i32> {
         checks.push(Check::new(
             name,
             "ok",
-            crate::enrich::find_in_path(program)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| format!("{program} not found in PATH")),
+            crate::enrich::find_in_path(program).map_or_else(
+                || format!("{program} not found in PATH"),
+                |path| path.display().to_string(),
+            ),
         ));
     }
     checks.push(Check::new(
@@ -337,12 +338,10 @@ pub fn status(context: &Context) -> Result<i32> {
         "  range     {} .. {}",
         stats
             .earliest_wall_ns
-            .map(fmt_time)
-            .unwrap_or_else(|| "-".to_string()),
+            .map_or_else(|| "-".to_string(), fmt_time),
         stats
             .latest_wall_ns
-            .map(fmt_time)
-            .unwrap_or_else(|| "-".to_string())
+            .map_or_else(|| "-".to_string(), fmt_time)
     );
     println!("\nROWS");
     let rows: Vec<Vec<String>> = stats
@@ -359,8 +358,7 @@ pub fn status(context: &Context) -> Result<i32> {
                 run.run_id.to_string(),
                 fmt_time(run.started_wall_ns),
                 run.stopped_wall_ns
-                    .map(fmt_time)
-                    .unwrap_or_else(|| "open".to_string()),
+                    .map_or_else(|| "open".to_string(), fmt_time),
                 run.version.clone(),
                 if run.simulated { "simulated" } else { "live" }.to_string(),
             ]
@@ -418,77 +416,78 @@ fn collector_row(health: &CollectorHealth) -> Vec<String> {
 /// Static capability probe.
 pub fn capabilities(context: &Context) -> Result<i32> {
     let root = SourceRoot::real();
-    let mut items = Vec::new();
-    items.push(capability(
-        "procfs",
-        root.has_procfs(),
-        "host counters and process inventory",
-    ));
-    items.push(capability(
-        "cgroup_v2",
-        root.cgroup_root().is_some(),
-        "service/container CPU, memory, I/O, PIDs and pressure",
-    ));
-    items.push(capability(
-        "psi",
-        root.proc_path("pressure/cpu").is_file(),
-        "host CPU/memory/I/O pressure stall information",
-    ));
-    items.push(capability(
-        "network_counters",
-        root.proc_path("net/dev").is_file(),
-        "host interface bytes/packets/errors/drops",
-    ));
-    items.push(capability(
-        "disk_counters",
-        root.proc_path("diskstats").is_file(),
-        "whole-device read/write bytes",
-    ));
-    items.push(capability(
-        "docker",
-        crate::enrich::find_in_path("docker").is_some(),
-        "bounded docker ps metadata; Engine API/events planned",
-    ));
-    items.push(capability(
-        "tmux",
-        crate::enrich::find_in_path("tmux").is_some(),
-        "pane PIDs and session labels via list-panes",
-    ));
-    items.push(capability(
-        "zellij",
-        crate::enrich::find_in_path("zellij").is_some(),
-        "session-level detection only; no pane PID contract",
-    ));
-    items.push(capability(
-        "systemd_mapping",
-        root.proc_path("self/cgroup").is_file(),
-        "unit inferred from cgroup path; D-Bus events planned",
-    ));
-    items.push(capability(
-        "taskstats",
-        false,
-        "not implemented in v0.1; exit-time accounting unavailable",
-    ));
-    items.push(capability(
-        "process_connector",
-        false,
-        "not implemented in v0.1; reconcile scans only",
-    ));
-    items.push(capability(
-        "ebpf",
-        false,
-        "not implemented and never required for baseline",
-    ));
-    items.push(capability(
-        "journald",
-        false,
-        "not implemented in v0.1; explicit file/Docker sources only",
-    ));
-    items.push(capability(
-        "html_report",
-        true,
-        "self-contained offline HTML with inline CSS/JS",
-    ));
+    let items = vec![
+        capability(
+            "procfs",
+            root.has_procfs(),
+            "host counters and process inventory",
+        ),
+        capability(
+            "cgroup_v2",
+            root.cgroup_root().is_some(),
+            "service/container CPU, memory, I/O, PIDs and pressure",
+        ),
+        capability(
+            "psi",
+            root.proc_path("pressure/cpu").is_file(),
+            "host CPU/memory/I/O pressure stall information",
+        ),
+        capability(
+            "network_counters",
+            root.proc_path("net/dev").is_file(),
+            "host interface bytes/packets/errors/drops",
+        ),
+        capability(
+            "disk_counters",
+            root.proc_path("diskstats").is_file(),
+            "whole-device read/write bytes",
+        ),
+        capability(
+            "docker",
+            crate::enrich::find_in_path("docker").is_some(),
+            "bounded docker ps metadata; Engine API/events planned",
+        ),
+        capability(
+            "tmux",
+            crate::enrich::find_in_path("tmux").is_some(),
+            "pane PIDs and session labels via list-panes",
+        ),
+        capability(
+            "zellij",
+            crate::enrich::find_in_path("zellij").is_some(),
+            "session-level detection only; no pane PID contract",
+        ),
+        capability(
+            "systemd_mapping",
+            root.proc_path("self/cgroup").is_file(),
+            "unit inferred from cgroup path; D-Bus events planned",
+        ),
+        capability(
+            "taskstats",
+            false,
+            "not implemented in v0.1; exit-time accounting unavailable",
+        ),
+        capability(
+            "process_connector",
+            false,
+            "not implemented in v0.1; reconcile scans only",
+        ),
+        capability(
+            "ebpf",
+            false,
+            "not implemented and never required for baseline",
+        ),
+        capability(
+            "journald",
+            false,
+            "not implemented in v0.1; explicit file/Docker sources only",
+        ),
+        capability(
+            "html_report",
+            true,
+            "self-contained offline HTML with inline CSS/JS",
+        ),
+    ];
     if context.json {
         print_json(&items)?;
     } else {
@@ -538,11 +537,9 @@ pub fn gaps(context: &Context) -> Result<i32> {
                 row.gap.kind.clone(),
                 row.gap
                     .since_wall_ns
-                    .map(fmt_time)
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), fmt_time),
                 row.resolved_wall_ns
-                    .map(fmt_time)
-                    .unwrap_or_else(|| "open".to_string()),
+                    .map_or_else(|| "open".to_string(), fmt_time),
                 row.gap.detail.clone(),
             ]
         })
@@ -615,9 +612,7 @@ pub fn prune(context: &mut Context) -> Result<i32> {
 /// Measure collection and write throughput.
 pub fn benchmark(context: &Context, cycles: u64, fixture_root: Option<&Path>) -> Result<i32> {
     let cycles = cycles.clamp(1, 100_000);
-    let root = fixture_root
-        .map(SourceRoot::fixture)
-        .unwrap_or_else(SourceRoot::real);
+    let root = fixture_root.map_or_else(SourceRoot::real, SourceRoot::fixture);
     if !root.has_procfs() {
         return Err(crate::error::Error::unavailable(
             "/proc",
@@ -723,12 +718,12 @@ pub fn benchmark(context: &Context, cycles: u64, fixture_root: Option<&Path>) ->
 }
 
 /// Short availability label used by JSON output.
-pub fn availability_label(value: Availability) -> &'static str {
+pub const fn availability_label(value: Availability) -> &'static str {
     value.as_str()
 }
 
 /// Render a configured toggle.
-pub fn toggle_label(toggle: Toggle) -> &'static str {
+pub const fn toggle_label(toggle: Toggle) -> &'static str {
     toggle.as_str()
 }
 

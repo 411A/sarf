@@ -33,7 +33,7 @@ pub struct HostCapabilities {
 impl HostCapabilities {
     /// Probe the source root without reading the large files.
     pub fn detect(root: &SourceRoot) -> Self {
-        HostCapabilities {
+        Self {
             pressure_cpu: root.proc_path("pressure/cpu").is_file(),
             pressure_memory: root.proc_path("pressure/memory").is_file(),
             pressure_io: root.proc_path("pressure/io").is_file(),
@@ -77,8 +77,8 @@ pub struct HostCollector {
 
 impl HostCollector {
     /// Create a collector.
-    pub fn new(root: SourceRoot) -> Self {
-        HostCollector { root }
+    pub const fn new(root: SourceRoot) -> Self {
+        Self { root }
     }
 
     /// Probe optional interfaces.

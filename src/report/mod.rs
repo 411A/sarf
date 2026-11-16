@@ -43,8 +43,8 @@ pub struct ReportOptions {
 
 impl ReportOptions {
     /// Options for a plain window.
-    pub fn window(window: Window) -> Self {
-        ReportOptions {
+    pub const fn window(window: Window) -> Self {
+        Self {
             window,
             incident_id: None,
             process_id: None,
@@ -443,7 +443,7 @@ pub fn build(
     options: &ReportOptions,
 ) -> Result<ReportDocument> {
     let mut window = options.window;
-    let mut incident_filter = options.incident_id;
+    let incident_filter = options.incident_id;
     if let Some(incident_id) = options.incident_id {
         let incident = query::incident(conn, incident_id)?
             .ok_or_else(|| Error::Storage(format!("incident {incident_id} not found")))?;
@@ -454,14 +454,13 @@ pub fn build(
             incident.started_wall_ns.saturating_sub(60_000_000_000),
             end.saturating_add(30_000_000_000),
         );
-        incident_filter = Some(incident_id);
     }
 
     let stats = query::db_stats(conn)?;
     let counts = query::window_counts(conn, window)?;
     let host_points = query::host_series(conn, window)?;
     let sampled = downsample(&host_points, config.report.max_points);
-    let summary = summarize(&sampled, &counts, conn, window)?;
+    let mut summary = summarize(&sampled, &counts, conn, window)?;
     let series = series_data(&sampled);
     let usage = query::entity_usage(conn, window)?;
     let mut usage = usage;
@@ -503,6 +502,7 @@ pub fn build(
         });
     }
     let windows = window_views(conn, &windows, &window)?;
+    summary.window_count = windows.len() as u64;
 
     let mut nodes = process_nodes(conn, window, config.report.max_process_tree_nodes)?;
     if let Some(process_id) = &options.process_id {
@@ -564,13 +564,12 @@ pub fn build(
     events.sort_by_key(|event| event.wall_ns);
 
     let coverage = coverage_view(conn)?;
-    let coverage_status = if coverage
-        .collectors
-        .iter()
-        .any(|collector| collector.availability == "unavailable")
+    let coverage_status = if coverage.collectors.is_empty()
+        || coverage
+            .collectors
+            .iter()
+            .any(|collector| collector.availability == "unavailable")
     {
-        "partial"
-    } else if coverage.collectors.is_empty() {
         "partial"
     } else if coverage
         .collectors
@@ -598,7 +597,7 @@ pub fn build(
             kernel: stats.kernel_release,
             architecture: stats.architecture,
             simulated: latest_run.is_some_and(|run| run.simulated),
-            units_note: "CPU and PSI are percent of one logical core. Memory is bytes (IEC display). Timeline rates are bytes per second; tables show totals. Unavailable values are omitted, never zero.".to_string(),
+            units_note: "CPU and PSI are percent of one logical core. Memory is bytes (IEC display). Timeline rates are bytes per second; tables show totals. Unavailable values are omitted, never zero. Evidence is a temporal association only; causation is not implied.".to_string(),
         },
         summary: ReportSummary {
             coverage: coverage_status.to_string(),
@@ -616,7 +615,7 @@ pub fn build(
 }
 
 fn summarize(
-    points: &[crate::store::query::HostSeriesPoint],
+    points: &[query::HostSeriesPoint],
     counts: &query::WindowCounts,
     conn: &rusqlite::Connection,
     window: Window,
@@ -657,7 +656,7 @@ fn summarize(
     })
 }
 
-fn series_data(points: &[crate::store::query::HostSeriesPoint]) -> SeriesData {
+fn series_data(points: &[query::HostSeriesPoint]) -> SeriesData {
     SeriesData {
         timestamps: points.iter().map(|point| point.wall_ns).collect(),
         cpu_pct: points.iter().map(|point| finite(point.cpu_pct)).collect(),
@@ -690,10 +689,7 @@ fn series_data(points: &[crate::store::query::HostSeriesPoint]) -> SeriesData {
 }
 
 /// Peak-preserving downsample: each chunk is represented by its highest CPU point.
-fn downsample(
-    points: &[crate::store::query::HostSeriesPoint],
-    max_points: usize,
-) -> Vec<crate::store::query::HostSeriesPoint> {
+fn downsample(points: &[query::HostSeriesPoint], max_points: usize) -> Vec<query::HostSeriesPoint> {
     let max_points = max_points.max(2);
     if points.len() <= max_points {
         return points.to_vec();
@@ -1075,7 +1071,7 @@ mod tests {
         let now = 1_700_000_000_000_000_000;
         store
             .write(&[crate::store::WriteItem::normal(
-                crate::store::WriteRecord::Log(crate::model::LogRecord {
+                crate::store::WriteRecord::Log(LogRecord {
                     wall_ns: now - 1,
                     mono_ns: None,
                     source_id: "test".into(),
@@ -1100,7 +1096,7 @@ mod tests {
     fn downsample_preserves_peaks_and_bounds_points() {
         let mut points = Vec::new();
         for index in 0..1000 {
-            points.push(crate::store::query::HostSeriesPoint {
+            points.push(query::HostSeriesPoint {
                 wall_ns: index,
                 cpu_pct: Some(if index == 500 { 99.0 } else { 1.0 }),
                 ..Default::default()

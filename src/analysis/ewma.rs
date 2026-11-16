@@ -53,7 +53,7 @@ impl Ewma {
         } else {
             DEFAULT_ALPHA
         };
-        Ewma {
+        Self {
             alpha,
             mean: 0.0,
             variance: 0.0,
@@ -80,8 +80,9 @@ impl Ewma {
         }
         let old_mean = self.mean;
         let deviation = value - old_mean;
-        self.variance = self.alpha * deviation * deviation + (1.0 - self.alpha) * self.variance;
-        self.mean = self.alpha * value + (1.0 - self.alpha) * old_mean;
+        self.variance =
+            (1.0 - self.alpha).mul_add(self.variance, self.alpha * deviation * deviation);
+        self.mean = (1.0 - self.alpha).mul_add(old_mean, self.alpha * value);
         self.samples = self.samples.saturating_add(1);
         if !self.is_warmed_up() {
             return None;
@@ -90,12 +91,12 @@ impl Ewma {
     }
 
     /// Current weighted mean (zero before the first observation).
-    pub fn mean(&self) -> f64 {
+    pub const fn mean(&self) -> f64 {
         self.mean
     }
 
     /// Current weighted variance (zero before the first observation).
-    pub fn variance(&self) -> f64 {
+    pub const fn variance(&self) -> f64 {
         self.variance
     }
 
@@ -105,12 +106,12 @@ impl Ewma {
     }
 
     /// Number of accepted observations.
-    pub fn samples(&self) -> u64 {
+    pub const fn samples(&self) -> u64 {
         self.samples
     }
 
     /// Whether enough observations were seen to trust a z-score.
-    pub fn is_warmed_up(&self) -> bool {
+    pub const fn is_warmed_up(&self) -> bool {
         self.samples >= self.warmup
     }
 
@@ -126,7 +127,7 @@ impl Ewma {
     }
 
     /// Forget all observations and return to the startup state.
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.mean = 0.0;
         self.variance = 0.0;
         self.samples = 0;

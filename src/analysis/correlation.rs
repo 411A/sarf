@@ -92,7 +92,7 @@ struct UsageMeta {
 impl UsageMeta {
     /// Copy the display fields we need from a usage row.
     fn from_usage(usage: &EntityUsage) -> Self {
-        UsageMeta {
+        Self {
             name: usage.name.clone(),
             tool: usage.tool.clone(),
             container: usage.container.clone(),
@@ -408,13 +408,13 @@ fn build_contributors(
             acc.io_write = acc.io_write.saturating_add(entity.io_write);
             acc.buckets = acc.buckets.saturating_add(1);
             if acc.name.is_empty() {
-                acc.name = entity.name.clone();
+                acc.name.clone_from(&entity.name);
             }
             if acc.tool.is_none() {
-                acc.tool = entity.tool.clone();
+                acc.tool.clone_from(&entity.tool);
             }
             if acc.container.is_none() {
-                acc.container = entity.container.clone();
+                acc.container.clone_from(&entity.container);
             }
         }
     }
@@ -461,13 +461,13 @@ fn build_contributors(
             let mut container = item.acc.container;
             if let Some(meta) = context.usage_meta.get(&item.entity_id) {
                 if name.is_empty() || name == item.entity_id {
-                    name = meta.name.clone();
+                    name.clone_from(&meta.name);
                 }
                 if tool.is_none() {
-                    tool = meta.tool.clone();
+                    tool.clone_from(&meta.tool);
                 }
                 if container.is_none() {
-                    container = meta.container.clone();
+                    container.clone_from(&meta.container);
                 }
             }
             Contribution {
@@ -633,10 +633,7 @@ fn push_host_evidence(evidence: &mut Vec<String>, context: &Context<'_>, run: &[
         ];
         for (slot, candidate) in psi.iter_mut().zip(candidates) {
             if let Some(value) = candidate {
-                *slot = Some(match *slot {
-                    Some(current) => current.max(value),
-                    None => value,
-                });
+                *slot = Some(slot.map_or(value, |current| current.max(value)));
             }
         }
     }
@@ -750,7 +747,7 @@ fn lifecycle_counts(events: &[EventRecord], start: i64, end: i64) -> (usize, usi
 }
 
 /// Metric used to rank contributors for a window metric.
-fn contribution_metric(window_metric: Metric) -> Metric {
+const fn contribution_metric(window_metric: Metric) -> Metric {
     match window_metric {
         Metric::Memory | Metric::PsiMemory => Metric::Memory,
         Metric::IoRead => Metric::IoRead,
@@ -785,7 +782,9 @@ fn max_memory(current: Option<u64>, incoming: Option<u64>) -> Option<u64> {
 
 /// Confidence in the association (never 1.0).
 fn confidence_for(context: &Context<'_>, supporting: usize, finite_count: usize) -> f64 {
-    let base = (CONFIDENCE_BASE + CONFIDENCE_STEP * supporting as f64).min(CONFIDENCE_MAX);
+    let base = CONFIDENCE_STEP
+        .mul_add(supporting as f64, CONFIDENCE_BASE)
+        .min(CONFIDENCE_MAX);
     let missing_fraction = if context.bucket_count == 0 {
         0.0
     } else {
@@ -845,8 +844,8 @@ fn median(values: &[f64]) -> f64 {
     let mut sorted: Vec<f64> = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
-        (sorted[middle - 1] + sorted[middle]) / 2.0
+    if sorted.len().is_multiple_of(2) {
+        f64::midpoint(sorted[middle - 1], sorted[middle])
     } else {
         sorted[middle]
     }
@@ -857,7 +856,7 @@ fn find_runs<F: Fn(f64) -> bool>(values: &[Option<f64>], predicate: F) -> Vec<Ve
     let mut runs = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     for (index, value) in values.iter().enumerate() {
-        let matches = value.is_some_and(|value| predicate(value));
+        let matches = value.is_some_and(&predicate);
         if !matches {
             continue;
         }
@@ -895,10 +894,11 @@ fn dedupe(windows: Vec<AttributionWindow>) -> Vec<AttributionWindow> {
     let mut kept: Vec<AttributionWindow> = Vec::new();
     for candidate in windows {
         let existing = kept.iter().position(|window| {
+            let overlap_start = window.start_wall_ns.max(candidate.start_wall_ns);
+            let overlap_end = window.end_wall_ns.min(candidate.end_wall_ns);
             window.metric == candidate.metric
                 && window.kind == candidate.kind
-                && window.start_wall_ns < candidate.end_wall_ns
-                && candidate.start_wall_ns < window.end_wall_ns
+                && overlap_start < overlap_end
         });
         match existing {
             Some(index) if candidate.confidence > kept[index].confidence => {
@@ -927,15 +927,11 @@ fn finalize(mut windows: Vec<AttributionWindow>, max_windows: usize) -> Vec<Attr
 
 /// Sort key that prefers high windows over low ones when capping.
 fn kind_rank(kind: WindowKind) -> u8 {
-    if kind == WindowKind::High {
-        0
-    } else {
-        1
-    }
+    u8::from(kind != WindowKind::High)
 }
 
 /// Human-readable metric label used in evidence.
-fn metric_label(metric: Metric) -> &'static str {
+const fn metric_label(metric: Metric) -> &'static str {
     match metric {
         Metric::Cpu => "host CPU",
         Metric::Memory => "used memory",
@@ -957,7 +953,7 @@ fn format_value(metric: Metric, value: f64) -> String {
 }
 
 /// Label for the PSI slot index.
-fn psi_label(index: usize) -> &'static str {
+const fn psi_label(index: usize) -> &'static str {
     match index {
         0 => "CPU",
         1 => "memory",
@@ -1040,7 +1036,7 @@ mod tests {
         let first = intervals
             .first()
             .copied()
-            .unwrap_or(interval(600, 6_000, 500_000, 0.4));
+            .unwrap_or_else(|| interval(600, 6_000, 500_000, 0.4));
         let mut items = vec![WriteItem::normal(WriteRecord::HostSample(host_sample(
             start_wall,
             0,
@@ -1081,8 +1077,7 @@ mod tests {
                 stable_key: format!("{}:1", 10 + index),
                 name: format!("worker-{index}"),
                 source: "test".to_string(),
-                labels: [("container_id".to_string(), format!("container-{index}"))]
-                    .into_iter()
+                labels: std::iter::once(("container_id".to_string(), format!("container-{index}")))
                     .collect(),
                 first_seen_wall_ns: 0,
                 last_seen_wall_ns: 0,
@@ -1090,16 +1085,19 @@ mod tests {
         }
         store.write(&items).expect("entities");
 
+        use std::fmt::Write as _;
+
         let mut sql = String::new();
         for index in 0..count {
             let cpu_usec = 1_000_000u64.saturating_sub(index as u64 * 50_000);
             for start in starts {
-                sql.push_str(&format!(
+                let _ = writeln!(
+                    sql,
                     "INSERT INTO rollup_1m(bucket_wall_ns, entity_id, entity_kind, sample_count, \
                      cpu_total_usec, memory_max_bytes, io_read_bytes, io_write_bytes) \
-                     VALUES ({start}, 'cgroup:1:{}', 'cgroup', 12, {cpu_usec}, 4194304, 1024, 2048);\n",
+                     VALUES ({start}, 'cgroup:1:{}', 'cgroup', 12, {cpu_usec}, 4194304, 1024, 2048);",
                     10 + index
-                ));
+                );
             }
         }
         store

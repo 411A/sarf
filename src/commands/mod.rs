@@ -10,7 +10,7 @@ pub mod system;
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
 use clap::Parser;
 use serde::Serialize;
 
@@ -47,7 +47,7 @@ impl Context {
             config.validate()?;
             config
         };
-        Ok(Context {
+        Ok(Self {
             data_dir,
             config,
             json: cli.json,
@@ -143,9 +143,6 @@ pub fn fmt_time(wall_ns: i64) -> String {
     if wall_ns <= 0 {
         return "-".to_string();
     }
-    let offset =
-        FixedOffset::east_opt(0).unwrap_or_else(|| FixedOffset::east_opt(0).expect("zero"));
-    let _ = offset;
     let local = Local
         .timestamp_opt(wall_ns / 1_000_000_000, 0)
         .earliest()
@@ -176,8 +173,7 @@ pub fn fmt_bytes(bytes: Option<u64>) -> String {
 pub fn fmt_pct(value: Option<f64>) -> String {
     value
         .filter(|value| value.is_finite())
-        .map(|value| format!("{value:.1}%"))
-        .unwrap_or_else(|| "-".to_string())
+        .map_or_else(|| "-".to_string(), |value| format!("{value:.1}%"))
 }
 
 /// Format a duration between two wall clocks.
