@@ -917,7 +917,9 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
     let mut usage = Vec::with_capacity(accumulators.len());
     for (entity_id, acc) in accumulators {
         let cpu_avg_pct = if acc.covered_ns > 0 {
-            Some(acc.cpu_total_usec as f64 * 1_000_000.0 / acc.covered_ns as f64)
+            // usec of CPU over ns of wall time -> percent of one core:
+            // usec / (ns / 1_000) * 100 == usec * 100_000 / ns.
+            Some(acc.cpu_total_usec as f64 * 100_000.0 / acc.covered_ns as f64)
         } else if acc.cpu_weight > 0 {
             Some(acc.cpu_avg_weighted / acc.cpu_weight as f64)
         } else {
@@ -2193,7 +2195,9 @@ mod tests {
         assert_eq!(cgroup.container.as_deref(), Some("abcdef0123456789"));
         assert_eq!(cgroup.net_rx_bytes, Some(3000));
         assert_eq!(cgroup.net_tx_bytes, Some(4000));
-        assert!(cgroup.cpu_avg_pct.unwrap() > 0.0);
+        let pct = cgroup.cpu_avg_pct.expect("cpu pct");
+        // 500,000 usec of CPU over the 60 s bucket is 0.8333% of one core.
+        assert!((pct - 0.833_333).abs() < 0.001, "cpu pct {pct}");
 
         let buckets = buckets(
             store.connection(),

@@ -122,7 +122,7 @@ Windows 11, Rust 1.98.1, release profile, fixture-driven perf test:
 | 20,000 host rows through the writer | 50.6 ms (≈394,980 rows/s) |
 | Report build + render, 599 points | 5.0 ms, 286,165 bytes |
 
-WSL2 Ubuntu 22.04, Linux 6.6.87, debug profile: 183 unit tests, all integration/e2e/
+WSL2 Ubuntu 22.04, Linux 6.6.87, debug profile: 184 unit tests, all integration/e2e/
 policy/plan tests pass; a live 5-cycle run read host/cgroup/PSI/network counters and
 produced per-container network rollups with zero writer drops. These numbers are
 environment-specific measurements, not guarantees.

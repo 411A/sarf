@@ -569,14 +569,24 @@ trait MetricDisplay {
 impl MetricDisplay for Metric {
     fn format_value(self, value: f64) -> String {
         match self {
-            Self::Cpu | Self::PsiCpu | Self::PsiMemory | Self::PsiIo => {
-                format!("{value:.1}% of one core")
-            }
+            Self::Cpu => format!("{value:.1}% of one core"),
+            Self::PsiCpu | Self::PsiMemory | Self::PsiIo => format!("{value:.1}%"),
             Self::Memory => fmt_bytes(Some(value.max(0.0) as u64)),
             Self::IoRead | Self::IoWrite | Self::NetRx | Self::NetTx => {
                 fmt_bytes(Some(value.max(0.0) as u64))
             }
             Self::Load => format!("{value:.2} load"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn psi_values_are_pressure_not_cpu_core_percent() {
+        assert_eq!(Metric::Cpu.format_value(6.2), "6.2% of one core");
+        assert_eq!(Metric::PsiCpu.format_value(6.2), "6.2%");
     }
 }

@@ -451,6 +451,9 @@ fn build_contributors(
             }
         })
         .collect();
+    // A low window ranks ascending, so entities with zero activity would otherwise
+    // appear as the top "contributors" with a 0.0% share. They are not evidence.
+    ranked.retain(|item| item.value > 0.0);
     let total: f64 = ranked.iter().map(|item| item.value).sum();
     for item in &mut ranked {
         item.share = if total > 0.0 {
