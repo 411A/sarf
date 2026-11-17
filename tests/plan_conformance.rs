@@ -22,6 +22,15 @@ fn read(relative: &str) -> String {
 }
 
 #[test]
+fn temporary_test_roots_do_not_collide() {
+    let first = common::temp_root("collision");
+    let second = common::temp_root("collision");
+    assert_ne!(first, second, "parallel tests must not share a temp root");
+    let _ = std::fs::remove_dir_all(first);
+    let _ = std::fs::remove_dir_all(second);
+}
+
+#[test]
 fn every_documented_command_parses() {
     let invocations: &[&[&str]] = &[
         &["sarf", "init"],

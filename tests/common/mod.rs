@@ -7,6 +7,9 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// Create a unique temporary directory, removing any stale copy first.
 pub fn temp_root(name: &str) -> PathBuf {
@@ -14,8 +17,12 @@ pub fn temp_root(name: &str) -> PathBuf {
     // profile temp to test processes, and target/ is already the build sandbox.
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp");
     std::fs::create_dir_all(&base).expect("create test temp base");
+    // Test threads can start within the same clock tick on Windows, so the
+    // timestamp alone is not unique. The atomic counter prevents two tests from
+    // sharing a database and failing with "database is locked".
+    let unique = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let root = base.join(format!(
-        "sarf-test-{name}-{}-{}",
+        "sarf-test-{name}-{}-{unique}-{}",
         std::process::id(),
         unique_suffix()
     ));
