@@ -424,3 +424,65 @@ across restarts, which it already is for the collector's source ids.
 
 **Upgrade path.** Persist cursors per container id in `integration_state` if container
 renames need to preserve the exact cursor.
+
+## ADR-023 - Reclaim space instead of deleting history forever
+
+**Context.** A production database sat at 120 MiB against `general.max_db_mb = 100`
+and never came back inside budget. Its own prune output showed the reason:
+
+```
+expire process samples older than 1h: deleted 3073 rows, now 135025344 bytes
+expire non-critical logs older than 1 day: deleted 162 rows, now 135025344 bytes
+```
+
+Deleting 3 073 rows freed zero bytes. The database was created before
+`PRAGMA auto_vacuum = INCREMENTAL` was applied, so it stayed at `auto_vacuum =
+NONE`: SQLite marks pages free for reuse but never returns them to the filesystem.
+The guard therefore escalated on every 5-minute pass from the configured policy
+(`process_raw_hours = 24`, `log_days = 7`, `raw_hours = 48`) down to 1 h / 1 d /
+6 h, deleting history the policy said to keep, and still reported the same size.
+Separately, `sarf prune` against a live service spent 110 s waiting on the daemon's
+write lock, because both processes ran the same maintenance pass.
+
+**Decision.** In the disk guard:
+
+- if the file is over budget and `auto_vacuum` is not INCREMENTAL, run
+  `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` once, report
+  `vacuumed`/`reclaimed_bytes`, and re-measure. A converted database is never
+  vacuumed again, so this costs one pass, not one per five minutes.
+- the escalation steps carry their own explicit cutoff (1 h process, 1 day logs,
+  6 h raw, 2 days minute rollups) instead of a shared mutable cutoff.
+- if a step deletes rows and the file does not shrink, the guard sets
+  `guard_stalled`, stops escalating, and tells the operator to raise `max_db_mb`
+  or reduce `retention.raw_hours`. Deleting more history for no gain is not a fix.
+- `sarf prune --help` states that the service must be stopped first.
+
+**Consequences.** A legacy database is reclaimed once (a few seconds of CPU and
+roughly its own size in free disk during `VACUUM`); later deletes actually shrink
+the file, so the guard converges and stops running heavy passes every five
+minutes. If a database genuinely does not fit its budget, the operator sees the
+stall instead of silently losing the retention window they configured.
+
+**Upgrade path.** Batch the deletes (`LIMIT n` loops) and cap `incremental_vacuum`
+pages per pass if large databases make a single pass too long.
+
+## ADR-024 - A stopped collector must be visible
+
+**Context.** A full-observation deployment showed a live run, 338 000 stored
+cgroup rows and a service that looked healthy, but `range` ended one hour before
+`now`: nothing had been persisted for 68 minutes. `sarf story` then printed
+"no correlated groups" and the report showed `host CPU avg -`, which reads like an
+idle host rather than a stopped recorder. `Restart=on-failure` also means an exit
+with code 0 leaves the unit dead: the host looks monitored and records nothing.
+
+**Decision.** `sarf status` prints the age of the newest stored sample and marks it
+`STALE (expected every Ns)` when it is older than three sampling intervals; the
+same value is exposed as `latest_age_ns` and `stale` in `--json`. The unit uses
+`Restart=always` so a clean exit still comes back, with `StartLimitIntervalSec=300`
+and `StartLimitBurst=10` so a real crash loop stops instead of restarting forever.
+
+**Consequences.** A stalled or dead collector is visible in the first command an
+operator runs, and a crash loop cannot silently consume CPU indefinitely. The
+status line needs no new database state: it derives freshness from the newest
+sample timestamp that retention already preserves.
+

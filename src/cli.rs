@@ -177,6 +177,9 @@ pub enum Command {
         output: Option<PathBuf>,
     },
     /// Run retention, rollups and the disk guard once.
+    ///
+    /// Run it while the service is stopped: the daemon runs the same pass on
+    /// its own cadence and a second writer only makes both wait on locks.
     Prune,
     /// Measure bounded collection and database write throughput.
     Benchmark {

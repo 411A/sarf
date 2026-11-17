@@ -2,6 +2,10 @@
 Description=SARF service activity recorder
 Documentation=https://github.com/411A/sarf
 After=local-fs.target
+# Bound restart storms: a single crash restarts after RestartSec, but a crash
+# loop stops instead of burning CPU forever.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 # Deliberately no Wants=/After=network-online.target: SARF records local
 # activity and never contacts the network, so it must also start on isolated or
 # air-gapped hosts.
@@ -26,7 +30,10 @@ ExecStart=/usr/local/bin/sarf run --data-dir /var/lib/sarf --config /var/lib/sar
 User=sarf
 Group=sarf
 WorkingDirectory=/var/lib/sarf
-Restart=on-failure
+# Always, not on-failure: a recorder that exits "cleanly" (code 0) must still
+# come back, otherwise it silently records nothing. A genuine crash loop is
+# caught by the start limit above instead of restarting forever.
+Restart=always
 RestartSec=5
 
 # Give the single SQLite writer time to commit/flush its WAL on shutdown.

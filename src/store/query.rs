@@ -1730,6 +1730,17 @@ pub fn incident(conn: &Connection, incident_id: i64) -> Result<Option<Incident>>
     }
 }
 
+/// Newest stored raw host sample timestamp, or `None` when nothing is stored.
+///
+/// Uses the `host_samples` time index, so a startup probe is O(log n) instead of
+/// the `COUNT(*)`-per-table work in [`db_stats`].
+pub fn latest_sample_wall_ns(conn: &Connection) -> Result<Option<i64>> {
+    conn.query_row("SELECT MAX(wall_ts_ns) FROM host_samples", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+    .map_err(db_err)
+}
+
 /// Latest stored wall clock per log source whose id starts with `prefix`.
 ///
 /// The daemon uses this to resume external log cursors after a restart instead

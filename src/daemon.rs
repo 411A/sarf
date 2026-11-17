@@ -405,6 +405,14 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         WriteItem::normal(WriteRecord::Entity(host_entity)),
     ];
     let log_policy = LogPolicy::from_config(&options.config);
+    // A previous run that stopped or stalled, or a host that slept, leaves a
+    // silent hole. Record it once so `gaps`, `report` and `story` can show that
+    // the collector was not sampling, instead of presenting an idle host.
+    if let Some(gap) =
+        previous_collection_gap(&store, first_wall, options.config.general.interval_secs)
+    {
+        initial.push(WriteItem::normal(WriteRecord::Gap(gap)));
+    }
     let mut logs = LogManager::new(&options.config, log_policy);
     for (id, kind, target, hint, max_lines, max_bytes) in logs.descriptors() {
         initial.push(WriteItem::normal(WriteRecord::LogSource(LogSourceRow {
@@ -796,6 +804,36 @@ fn init_meta(store: &mut Store, facts: &HostFacts, root: &SourceRoot) -> Result<
         }),
     ])?;
     Ok(())
+}
+
+/// Gap between the newest stored sample and this run's start.
+///
+/// Returns `None` for a first run or a restart inside three sampling intervals,
+/// so a normal `systemctl restart` does not write a gap every time.
+fn previous_collection_gap(
+    store: &Store,
+    first_wall: i64,
+    interval_secs: u64,
+) -> Option<CoverageGap> {
+    use crate::store::query;
+
+    let latest = query::latest_sample_wall_ns(store.connection())
+        .ok()
+        .flatten()?;
+    let interval_ns = (interval_secs.max(1) as i64) * 1_000_000_000;
+    let gap_ns = first_wall.saturating_sub(latest);
+    if gap_ns <= interval_ns.saturating_mul(3) {
+        return None;
+    }
+    let seconds = gap_ns / 1_000_000_000;
+    Some(CoverageGap {
+        source_id: "collector".to_string(),
+        kind: "collection_gap".to_string(),
+        since_wall_ns: Some(latest),
+        detail: format!(
+            "no samples stored for {seconds}s before this run started; the service was stopped, stalled or the host was not running"
+        ),
+    })
 }
 
 fn probe_coverage(root: &SourceRoot, health: &mut HealthRegistry, writer: &Writer, now: WallNs) {
@@ -1903,5 +1941,51 @@ mod tests {
         assert!(first.proc_root().ends_with("proc"));
         assert!(second.proc_root().ends_with("cycle-0001/proc"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+    use crate::model::{CpuTimes, HostSample, MemSnapshot};
+    use crate::store::{Store, WriteItem, WriteRecord};
+    use crate::time::{ClockDomain, Stamps};
+
+    fn store_with_sample(wall_ns: i64) -> Store {
+        let mut store = Store::open_in_memory().expect("store");
+        store
+            .write(&[WriteItem::normal(WriteRecord::HostSample(HostSample {
+                stamps: Stamps::new(wall_ns, wall_ns, "boot-a", ClockDomain::Simulated),
+                cpu: CpuTimes::default(),
+                mem: MemSnapshot::default(),
+                ..Default::default()
+            }))])
+            .expect("write sample");
+        store
+    }
+
+    #[test]
+    fn a_long_hole_between_runs_is_recorded_once() {
+        let store = store_with_sample(1_000_000_000_000);
+        let gap = previous_collection_gap(&store, 1_000_000_000_000 + 68 * 60 * 1_000_000_000, 5)
+            .expect("gap");
+        assert_eq!(gap.source_id, "collector");
+        assert_eq!(gap.kind, "collection_gap");
+        assert_eq!(gap.since_wall_ns, Some(1_000_000_000_000));
+        assert!(gap.detail.contains("4080s"), "detail: {}", gap.detail);
+    }
+
+    #[test]
+    fn a_normal_restart_is_not_a_gap() {
+        let store = store_with_sample(1_000_000_000_000);
+        assert!(
+            previous_collection_gap(&store, 1_000_000_000_000 + 10 * 1_000_000_000, 5).is_none()
+        );
+    }
+
+    #[test]
+    fn a_first_run_has_no_gap() {
+        let store = Store::open_in_memory().expect("store");
+        assert!(previous_collection_gap(&store, 1_000_000_000_000, 5).is_none());
     }
 }

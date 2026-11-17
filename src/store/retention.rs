@@ -104,6 +104,14 @@ pub struct PruneReport {
     pub deleted_rollup_1h: u64,
     /// Disk-guard escalation steps applied (empty when inside budget).
     pub pressure_steps: Vec<String>,
+    /// Whether a one-time `VACUUM` converted the database to incremental
+    /// auto-vacuum so deleted rows actually return pages to the filesystem.
+    pub vacuumed: bool,
+    /// Bytes reclaimed by that conversion.
+    pub reclaimed_bytes: u64,
+    /// Whether the disk guard stopped early because deletes were not reclaiming
+    /// space (deleting more rows would only lose history).
+    pub guard_stalled: bool,
     /// Whether a WAL checkpoint ran.
     pub checkpointed: bool,
     /// Wall-clock duration of the prune pass.
@@ -222,29 +230,55 @@ pub fn prune(
     // Disk guard: escalate in the documented degradation order.
     let mut usage = data_dir_usage(data_dir);
     if usage > policy.max_db_bytes {
+        // Deleting rows only returns pages to the filesystem when the database
+        // uses incremental auto-vacuum. A database created by an older SARF
+        // build has auto_vacuum=NONE, so each pass would delete more history
+        // and still never get inside the budget. Convert once: that also
+        // reclaims the pages that past deletions left behind.
+        if !incremental_vacuum_enabled(store) {
+            let before = usage;
+            if convert_to_incremental_vacuum(store) {
+                usage = data_dir_usage(data_dir);
+                report.vacuumed = true;
+                report.reclaimed_bytes = before.saturating_sub(usage);
+                report.pressure_steps.push(format!(
+                    "reclaimed {} bytes with VACUUM and enabled incremental auto-vacuum",
+                    report.reclaimed_bytes
+                ));
+            } else {
+                report.pressure_steps.push(
+                    "could not VACUUM (database is busy or out of space); deletes will not reclaim space"
+                        .to_string(),
+                );
+            }
+        }
         let steps = [
             (
                 "expire process samples older than 1h",
                 "DELETE FROM process_samples WHERE wall_ts_ns < ?1",
+                now_wall_ns - HOUR_NS,
             ),
             (
                 "expire non-critical logs older than 1 day",
                 "DELETE FROM logs WHERE wall_ts_ns < ?1 AND incident_id IS NULL AND (level IS NULL OR level NOT IN ('error','critical'))",
+                now_wall_ns - 24 * HOUR_NS,
             ),
             (
                 "expire raw host/cgroup samples older than 6h",
                 "DELETE FROM host_samples WHERE wall_ts_ns < ?1",
+                now_wall_ns - 6 * HOUR_NS,
             ),
             (
                 "expire minute rollups older than 2 days",
                 "DELETE FROM rollup_1m WHERE bucket_wall_ns < ?1",
+                now_wall_ns - 48 * HOUR_NS,
             ),
         ];
-        let mut cutoff = now_wall_ns - HOUR_NS;
-        for (description, sql) in steps {
+        for (description, sql, cutoff) in steps {
             if usage <= policy.max_db_bytes {
                 break;
             }
+            let before = usage;
             let deleted = exec(store.connection_mut(), sql, params![cutoff])?;
             let _ = store
                 .connection()
@@ -253,12 +287,17 @@ pub fn prune(
             report.pressure_steps.push(format!(
                 "{description}: deleted {deleted} rows, now {usage} bytes"
             ));
-            // Later steps are progressively harsher windows.
-            cutoff = match cutoff {
-                value if value == now_wall_ns - HOUR_NS => now_wall_ns - 24 * HOUR_NS,
-                value if value == now_wall_ns - 24 * HOUR_NS => now_wall_ns - 6 * HOUR_NS,
-                _ => now_wall_ns - 2 * 24 * HOUR_NS,
-            };
+            // Never keep deleting history for no gain: if a step removed rows
+            // and the file did not shrink, stop and report the stall instead of
+            // escalating to a harsher window.
+            if deleted > 0 && usage >= before {
+                report.guard_stalled = true;
+                report.pressure_steps.push(
+                    "deletes are not reclaiming space; stopped the guard instead of deleting more history"
+                        .to_string(),
+                );
+                break;
+            }
         }
     }
 
@@ -276,6 +315,27 @@ fn exec(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<u
     conn.execute(sql, params)
         .map(|rows| rows as u64)
         .map_err(|err| Error::Storage(format!("prune delete: {err}")))
+}
+
+/// Whether the database returns freed pages to the filesystem (`auto_vacuum`
+/// value 2 = INCREMENTAL).
+fn incremental_vacuum_enabled(store: &Store) -> bool {
+    store
+        .connection()
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))
+        .is_ok_and(|value| value == 2)
+}
+
+/// Convert the database to incremental auto-vacuum and reclaim freed pages.
+///
+/// `auto_vacuum` can only change together with a `VACUUM`, which rewrites the
+/// file once. It is guarded so a busy database (a second process, or a full
+/// disk) degrades to "space not reclaimed" instead of failing the prune pass.
+fn convert_to_incremental_vacuum(store: &mut Store) -> bool {
+    let conn = store.connection_mut();
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
+    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")
+        .is_ok()
 }
 
 fn data_dir_usage(data_dir: &std::path::Path) -> u64 {
@@ -996,6 +1056,47 @@ mod tests {
             max_db_bytes: u64::MAX,
             clock_ticks_per_second: clock_ticks,
         }
+    }
+
+    #[test]
+    fn legacy_database_is_converted_to_incremental_vacuum_once() {
+        let root = std::env::temp_dir().join(format!(
+            "sarf-vacuum-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        let data_dir = crate::paths::DataDir::new(&root);
+        let mut store = Store::open(&data_dir.db_path()).expect("store");
+        // Reproduce the layout of a database created before auto-vacuum existed.
+        store
+            .connection()
+            .execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+            .expect("legacy layout");
+        assert!(!incremental_vacuum_enabled(&store));
+
+        let now = 10 * HOUR_NS;
+        write_host_run(&mut store, now - 20 * 60 * 1_000_000_000, 18);
+
+        let mut tight = policy(100);
+        tight.max_db_bytes = 1;
+        let first = prune(&mut store, &tight, now, &root).expect("first prune");
+        assert!(
+            first.vacuumed,
+            "an over-budget legacy database must reclaim its pages once"
+        );
+        assert!(incremental_vacuum_enabled(&store));
+
+        let second = prune(&mut store, &tight, now, &root).expect("second prune");
+        assert!(
+            !second.vacuumed,
+            "a converted database must never be vacuumed again"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn host_sample(wall: i64, mono: i64, user: u64, idle: u64, used: u64) -> HostSample {

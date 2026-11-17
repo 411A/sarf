@@ -10,7 +10,7 @@ use crate::collect::cgroup::CgroupCollector;
 use crate::collect::host::{HostCapabilities, HostCollector};
 use crate::collect::process::{HostTiming, ProcessCollector};
 use crate::collect::{HostFacts, SourceRoot};
-use crate::commands::{fmt_bytes, fmt_time, print_json, print_table, Context};
+use crate::commands::{fmt_bytes, fmt_span, fmt_time, print_json, print_table, Context};
 use crate::config::Toggle;
 use crate::daemon::{self, DaemonOptions};
 use crate::error::Result;
@@ -319,6 +319,8 @@ pub fn status(context: &Context) -> Result<i32> {
         "counts": stats.counts,
         "earliest": stats.earliest_wall_ns,
         "latest": stats.latest_wall_ns,
+        "latest_age_ns": stats.latest_wall_ns.map(|latest| context.now.saturating_sub(latest)),
+        "stale": status_is_stale(stats.latest_wall_ns, context),
         "hostname": stats.hostname,
         "boot_id": stats.boot_id,
         "kernel": stats.kernel_release,
@@ -356,6 +358,10 @@ pub fn status(context: &Context) -> Result<i32> {
         stats
             .latest_wall_ns
             .map_or_else(|| "-".to_string(), fmt_time)
+    );
+    println!(
+        "  sampled   {}",
+        status_freshness(stats.latest_wall_ns, context)
     );
     println!("\nROWS");
     let rows: Vec<Vec<String>> = stats
@@ -567,6 +573,32 @@ pub fn gaps(context: &Context) -> Result<i32> {
     Ok(0)
 }
 
+/// A status line that makes a stalled recorder obvious: `story` and `report`
+/// silently see an empty window when nothing has been persisted for an hour.
+fn status_freshness(latest_wall_ns: Option<i64>, context: &Context) -> String {
+    let Some(latest) = latest_wall_ns else {
+        return "no samples stored yet".to_string();
+    };
+    let age = fmt_span(latest, Some(context.now), context.now);
+    let interval = context.config.general.interval_secs.max(1);
+    if status_is_stale(Some(latest), context) {
+        format!(
+            "{age} ago — STALE (expected every {interval}s): the service is not persisting samples"
+        )
+    } else {
+        format!("{age} ago")
+    }
+}
+
+/// Whether the newest stored sample is older than three sampling intervals.
+fn status_is_stale(latest_wall_ns: Option<i64>, context: &Context) -> bool {
+    let Some(latest) = latest_wall_ns else {
+        return false;
+    };
+    let limit = (context.config.general.interval_secs.max(1) as i64) * 3 * 1_000_000_000;
+    context.now.saturating_sub(latest) > limit
+}
+
 /// Run one retention pass.
 pub fn prune(context: &mut Context) -> Result<i32> {
     let mut store = context.open_write()?;
@@ -618,11 +650,23 @@ pub fn prune(context: &mut Context) -> Result<i32> {
             ],
         ];
         print_table(&["ACTION", "COUNT"], &rows);
+        if report.vacuumed {
+            println!(
+                "\nreclaimed {} with VACUUM; incremental auto-vacuum is now enabled",
+                fmt_bytes(Some(report.reclaimed_bytes))
+            );
+        }
         if !report.pressure_steps.is_empty() {
             println!("\ndisk guard:");
             for step in report.pressure_steps {
                 println!("  {step}");
             }
+        }
+        if report.guard_stalled {
+            println!(
+                "\nThe database is over the configured budget but deletes cannot shrink it.\n\
+                 Raise general.max_db_mb or reduce retention.raw_hours; do not keep pruning."
+            );
         }
     }
     Ok(0)

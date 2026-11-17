@@ -75,14 +75,38 @@ pub fn run_bounded_as(
         .args(args)
         .uid(uid)
         .gid(gid)
-        .env(
-            "PATH",
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        )
+        .env("PATH", STANDARD_PATH)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE");
-    run_bounded_command(command, program, timeout, max_bytes)
+    match run_bounded_command(command, program, timeout, max_bytes) {
+        Err(err @ (Error::PermissionDenied { .. } | Error::Io { .. })) => {
+            // Dropping to the socket owner needs CAP_SETUID. In a hardened unit
+            // (or when SARF already runs unprivileged) that transition fails and
+            // the spawn error is all we would otherwise see. A tmux client that
+            // runs with the *current* privileges is still read-only and no worse
+            // than its parent, so retry instead of losing every session.
+            let mut retry = Command::new(&program_path);
+            retry
+                .args(args)
+                .env("PATH", STANDARD_PATH)
+                .env_remove("TMUX")
+                .env_remove("TMUX_PANE");
+            run_bounded_command(retry, program, timeout, max_bytes).map_err(|fallback| {
+                Error::unavailable(
+                    "external command",
+                    format!(
+                        "{program}: uid {uid}/gid {gid} failed ({err}); current-user retry failed ({fallback})"
+                    ),
+                )
+            })
+        }
+        other => other,
+    }
 }
+
+/// Minimal PATH for a command that runs as another user.
+#[cfg(unix)]
+const STANDARD_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 fn run_bounded_command(
     mut command: Command,

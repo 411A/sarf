@@ -149,6 +149,23 @@ git, regenerate with the command above).
 Measured numbers from `sarf benchmark` and the release perf test are printed by the
 test suite; they are measurements, not guarantees. See `docs/TESTING.md`.
 
+## If the host feels busy, or the numbers stop moving
+
+- `sarf status` prints `sampled … ago`. Anything older than three sampling
+  intervals is marked **STALE**: the service is not persisting, and `story`/`report`
+  will look empty rather than wrong.
+- Storage is capped by `general.max_db_mb` (default 100). A smaller host with many
+  containers can legitimately exceed it; raising the budget is cheaper than watching
+  the disk guard trim the retention window you configured. The guard reports
+  `guard_stalled` instead of deleting more history when deletes cannot free space.
+- Sampling every 5 s over a few dozen cgroups is real work. `general.interval_secs`
+  and `process_interval_secs` scale it linearly; 10 s halves it and loses no
+  accounting (counters are deltas, not samples).
+- `sarf prune` runs the same pass as the daemon. Stop the service first, otherwise
+  both processes wait on the same write lock.
+- `sarf story`, `report` and `export` scan the database for their window. Use
+  `--since` and `--limit` to bound the read instead of blaming the collector.
+
 ## Commands
 
 ```text
