@@ -36,7 +36,7 @@ curl -fsSL -o sarf \
   https://github.com/411A/sarf/releases/latest/download/sarf-x86_64-unknown-linux-musl \
   && chmod +x sarf \
   && sudo ./sarf install --docker-group --start
-sudo sarf doctor
+sudo sarf doctor --data-dir /var/lib/sarf
 ```
 
 Or step by step, if you prefer to inspect the binary first:
@@ -46,7 +46,7 @@ curl -fsSL -o sarf \
   https://github.com/411A/sarf/releases/latest/download/sarf-x86_64-unknown-linux-musl
 chmod +x sarf
 sudo ./sarf install --docker-group --start
-sudo sarf doctor
+sudo sarf doctor --data-dir /var/lib/sarf
 ```
 
 On ARM64, replace `x86_64` with `aarch64` in the asset name. The release assets are
@@ -61,6 +61,11 @@ configuration and the hardened systemd unit, and enables/starts the service.
 - Omit `--start` to install the unit without starting it.
 - Use `--prefix PATH`, `--user NAME`, `--data-dir PATH` or `--no-systemd` for
   non-default layouts. Run `sarf install --help` for the full list.
+
+The service stores history in `/var/lib/sarf`. Pass
+`--data-dir /var/lib/sarf` to every read command (`doctor`, `status`, `top`,
+`why`, `report`, ...). Without it, the CLI uses the default `sarf-data` next to
+the executable or the working directory, which is a different database.
 
 For a build from source, the same command works from the repository binary:
 

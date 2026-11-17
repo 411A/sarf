@@ -57,7 +57,7 @@ curl -fsSL -o sarf \
   https://github.com/411A/sarf/releases/latest/download/sarf-x86_64-unknown-linux-musl
 chmod +x sarf
 sudo ./sarf install --docker-group --start
-sudo sarf doctor
+sudo sarf doctor --data-dir /var/lib/sarf
 ```
 
 The same command upgrades an existing installation: it replaces the binary,
