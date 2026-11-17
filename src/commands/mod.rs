@@ -60,13 +60,17 @@ impl Context {
     pub fn open_read(&self) -> Result<Store> {
         let path = self.data_dir.db_path();
         if !path.is_file() {
-            return Err(Error::unavailable(
-                "database",
-                format!(
-                    "{} does not exist; run `sarf init` and `sarf run` first",
-                    path.display()
-                ),
-            ));
+            let mut reason = format!(
+                "{} does not exist; run `sarf init` and `sarf run` first",
+                path.display()
+            );
+            let service_db = Path::new("/var/lib/sarf/sarf.db");
+            if service_db.is_file() && service_db != path.as_path() {
+                reason.push_str(
+                    "; a service database exists at /var/lib/sarf, pass --data-dir /var/lib/sarf",
+                );
+            }
+            return Err(Error::unavailable("database", reason));
         }
         Store::open_read_only(&path)
     }
@@ -152,6 +156,35 @@ pub fn fmt_time(wall_ns: i64) -> String {
         .earliest()
         .map(|stamp| stamp.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
     local.unwrap_or_else(|| format_wall_rfc3339(wall_ns))
+}
+
+/// Format a wall clock relative to a reference: the date is dropped when both
+/// fall on the same local day, which keeps grouped output short without losing
+/// millisecond precision.
+pub fn fmt_clock(wall_ns: i64, reference_ns: i64) -> String {
+    if wall_ns <= 0 {
+        return "-".to_string();
+    }
+    let local = |value: i64| {
+        Local
+            .timestamp_opt(
+                value.div_euclid(1_000_000_000),
+                value.rem_euclid(1_000_000_000) as u32,
+            )
+            .earliest()
+    };
+    let Some(stamp) = local(wall_ns) else {
+        return format_wall_rfc3339(wall_ns);
+    };
+    let same_day =
+        local(reference_ns).is_some_and(|reference| reference.date_naive() == stamp.date_naive());
+    stamp
+        .format(if same_day {
+            "%H:%M:%S%.3f"
+        } else {
+            "%Y-%m-%d %H:%M:%S%.3f"
+        })
+        .to_string()
 }
 
 /// Format bytes with IEC units.
@@ -378,6 +411,22 @@ mod tests {
     fn table_times_keep_milliseconds() {
         let text = fmt_time(1_767_225_600_123_000_000);
         assert!(text.contains(".123"), "expected milliseconds: {text}");
+    }
+
+    #[test]
+    fn clock_times_drop_the_date_only_within_one_day() {
+        let base = Local
+            .with_ymd_and_hms(2026, 11, 17, 12, 0, 0)
+            .single()
+            .expect("local noon")
+            .timestamp_nanos_opt()
+            .expect("nanos");
+        assert_eq!(fmt_clock(base, base), "12:00:00.000");
+        let later = fmt_clock(base + 2 * 86_400_000_000_000, base);
+        assert!(
+            later.starts_with("2026-11-19"),
+            "other days keep the date: {later}"
+        );
     }
 
     #[test]

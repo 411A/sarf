@@ -109,12 +109,12 @@ pub fn discover_tmux() -> SessionDiscovery {
                     }
                     Ok(output) => {
                         last_error = Some(if output.timed_out {
-                            "tmux list-panes timed out".to_string()
+                            format!("{}: tmux list-panes timed out", socket.display())
                         } else {
-                            "tmux server closed the query".to_string()
+                            format!("{}: tmux server closed the query", socket.display())
                         });
                     }
-                    Err(err) => last_error = Some(err.to_string()),
+                    Err(err) => last_error = Some(format!("{}: {err}", socket.display())),
                 }
             }
             if succeeded {

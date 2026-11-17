@@ -141,3 +141,24 @@ cargo test --test e2e -- --nocapture
 Reports are deterministic given the same DB window: `sarf report --since 1h --output
 out.html` embeds the bounded JSON payload; compare the `sarf-data` block or open the
 Coverage tab to see drops and gaps.
+
+## Story output size
+
+`sarf story` merges windows that describe the same episode and folds repeated
+lines, so the console view is a summary of the JSON document, never a different
+data set. To check a change:
+
+```bash
+sudo sarf --json story --since 1h --data-dir /var/lib/sarf > /tmp/story.json
+sudo sarf story --since 1h --data-dir /var/lib/sarf | wc -l
+```
+
+Assertions to look for: `group_count <= window_count`, every group has at least
+one entry in `metrics[]`, `repeats` is `>= 1` for every line, group `evidence`
+contains no duplicate strings, and only `relevant: true` links appear in the
+human `spawn` section.
+
+`cargo test --test e2e story_output_is_grouped_and_compact -- --nocapture` prints
+the rendered story for a fixture run and fails if the sections regress (separate
+`unattributed:` block, raw `process links:` dump, or more than one actor table per
+group).

@@ -65,11 +65,20 @@ pub fn run_bounded_as(
 ) -> Result<CommandOutput> {
     use std::os::unix::process::CommandExt as _;
 
-    let mut command = Command::new(program);
+    // Resolve the program with the *parent's* PATH, then run it by absolute
+    // path with a standard PATH for the target user. Otherwise a root-only PATH
+    // entry (e.g. /root/.local/bin/tmux) fails with EACCES after the uid drop,
+    // which surfaced as a bare "permission denied reading tmux".
+    let program_path = find_in_path(program).unwrap_or_else(|| std::path::PathBuf::from(program));
+    let mut command = Command::new(&program_path);
     command
         .args(args)
         .uid(uid)
         .gid(gid)
+        .env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
         .env_remove("TMUX")
         .env_remove("TMUX_PANE");
     run_bounded_command(command, program, timeout, max_bytes)

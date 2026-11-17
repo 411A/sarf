@@ -362,3 +362,65 @@ directory is chowned to root; existing history is preserved.
 
 **Upgrade path.** A future read-only helper or narrowly scoped capabilities can
 replace full root if the required observation set is proven sufficient.
+
+## ADR-021 - Story documents merge episodes and fold repeated lines
+
+**Context.** The first `sarf story` document emitted one group per detected window.
+`CPU` and `CPU pressure` covering the same interval produced two groups with an
+identical actor table, actor evidence, process-link list and log/event list, and every
+identical log or lifecycle event appeared once per occurrence. The document claimed
+no data was lost but spent most of its output repeating it.
+
+**Decision.** The story document is schema version 2:
+
+- Windows are merged into one *episode* per interval and kind before any query runs.
+  Only same-kind windows that contain each other or share a boundary are merged; a
+  partial overlap stays separate so evidence is never attributed to the wrong range.
+  The group keeps every metric with its own observed span, plus the union interval.
+- Contributors of all merged metrics become one actor list keyed by entity id, with
+  per-metric `contributors` retained inside each `StoryMetric`.
+- Identical log/event records (same source, level, message, entity or kind, entity,
+  payload) fold into one `StoryLogLine`/`StoryEventLine` with `repeats` and a
+  first/last timestamp.
+- Parent/child links keep a `relevant` flag: the child started inside the episode or
+  one side is an actor. The human view prints only relevant links and states how many
+  long-lived links existed; JSON keeps all of them up to the per-group bound.
+- `story` always reports the pre-merge `window_count`, the post-merge `group_count`,
+  and `process_lifetimes_truncated`, so a reduced view is never presented as complete.
+
+The human renderer prints one line per episode, a single host summary, one metric
+summary line, one actor table (idle entities summarized in one line), relevant links
+and one interleaved timeline. Log/event lines already printed for an earlier group are
+referenced by count instead of reprinted; `--json` remains the complete document.
+Timestamps drop the date when it equals the document range date.
+
+**Consequences.** Console output for a busy hour shrinks by roughly 4-6x while the JSON
+keeps every metric and every distinct line with its repeat count. Merged episodes take
+the union interval, so a metric may be reported over a wider span than the buckets that
+triggered it; each `StoryMetric` carries its own `start_wall_ns`/`end_wall_ns` to keep
+that explicit. Consumers of `schema_version: 1` must read `metrics[]` instead of the
+top-level `metric`/`value` fields.
+
+**Upgrade path.** If consumers need strict per-window output, add a
+`--no-merge` flag that keeps the v1 shape instead of changing the default.
+
+## ADR-022 - Docker log cursors resume from the database
+
+**Context.** `docker_log_cursors` lived only in memory. Every service restart (including
+each `sarf install` upgrade) re-read the last 500 lines per container and stored them
+again, so the same log line appeared two or three times with identical timestamps.
+
+**Decision.** At daemon start, read `MAX(wall_ts_ns)` per stored `docker:<container>`
+source and seed the cursor map before the first poll. The existing rule still drops
+lines at or before the cursor, and a live cursor still wins over the seed. Logs are
+additionally folded by identity in the story document, so historic duplicates remain
+readable as `repeats` instead of being rewritten.
+
+**Consequences.** Restarts no longer duplicate container logs, and the stored line count
+stops growing by `tail × containers` per restart. Existing duplicates stay in the
+database until retention removes them; the story view reports them as repeats.
+Detection assumes the docker log source name (`docker:<container name>`) is stable
+across restarts, which it already is for the collector's source ids.
+
+**Upgrade path.** Persist cursors per container id in `integration_state` if container
+renames need to preserve the exact cursor.

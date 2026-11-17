@@ -251,6 +251,70 @@ fn full_offline_forensics_workflow() {
 }
 
 #[test]
+fn story_output_is_grouped_and_compact() {
+    let root = common::temp_root("e2e-story");
+    let log_path = build_fixture(&root);
+    let data_dir = root.join("data/sarf-data");
+    common::config_with_log(&root.join("data"), &log_path, 60);
+    run(&data_dir, &["init"]);
+    run(
+        &data_dir,
+        &[
+            "run",
+            "--fixture-root",
+            root.to_str().expect("utf8 fixture path"),
+            "--cycles",
+            "10",
+            "--interval-secs",
+            "60",
+        ],
+    );
+    let output = run(&data_dir, &["story", "--since", "1h", "--limit", "4"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("{stdout}");
+    assert!(stdout.contains("INVESTIGATION STORY"), "stdout: {stdout}");
+    assert!(stdout.contains("group(s) from"), "stdout: {stdout}");
+    assert!(stdout.contains("  host    "), "stdout: {stdout}");
+    assert!(stdout.contains("  values  "), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("unattributed:"),
+        "attributed and unattributed evidence share one timeline: {stdout}"
+    );
+    assert!(
+        !stdout.contains("process links:"),
+        "process links are relevance filtered: {stdout}"
+    );
+    for group in stdout.split("\n[").skip(1) {
+        assert_eq!(
+            group.matches("actors  ").count().min(1),
+            1,
+            "one actor table per group: {group}"
+        );
+    }
+    let json = run(&data_dir, &["--json", "story", "--since", "1h"]);
+    let document: serde_json::Value = serde_json::from_slice(&json.stdout).expect("story JSON");
+    assert_eq!(
+        document
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
+    let window_count = document
+        .get("window_count")
+        .and_then(serde_json::Value::as_u64)
+        .expect("window_count");
+    let group_count = document
+        .get("group_count")
+        .and_then(serde_json::Value::as_u64)
+        .expect("group_count");
+    assert!(
+        window_count >= group_count,
+        "windows {window_count} should merge into {group_count} groups"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn report_command_supports_graph_alias_and_default_output() {
     let root = common::temp_root("e2e-alias");
     let log_path = build_fixture(&root);

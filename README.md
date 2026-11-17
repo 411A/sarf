@@ -116,6 +116,15 @@ sarf incidents --since 24h
 sarf report --since 1h                     # writes sarf-data/reports/*.html
 ```
 
+`sarf story` prints one block per episode: every metric that peaked in the same
+interval (`CPU`, `CPU pressure`, `I/O pressure`, ...) is listed in one group, so the
+actor table, host context, process links and logs appear once instead of once per
+metric. Identical log or lifecycle lines are printed once with a repeat count
+(`×3`), idle entities are summarized in one line, and a line already printed for an
+earlier group is referenced by count. `--json` always carries the complete document:
+every metric with its own span and contributors, every distinct log/event line with
+its repeat count, and every overlapping process link with a `relevant` flag.
+
 Open the HTML file in any browser with networking disabled. CSS, JavaScript and the
 JSON payload are inline; there are no CDNs, fonts, images or network calls.
 

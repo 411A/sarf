@@ -1730,6 +1730,33 @@ pub fn incident(conn: &Connection, incident_id: i64) -> Result<Option<Incident>>
     }
 }
 
+/// Latest stored wall clock per log source whose id starts with `prefix`.
+///
+/// The daemon uses this to resume external log cursors after a restart instead
+/// of re-reading (and re-storing) the last `tail` lines of every container.
+pub fn latest_log_wall_ns(conn: &Connection, prefix: &str) -> Result<HashMap<String, i64>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT source_id, MAX(wall_ts_ns)
+               FROM logs
+              WHERE source_id LIKE ?1
+           GROUP BY source_id",
+        )
+        .map_err(db_err)?;
+    let mut rows = statement
+        .query(params![format!("{prefix}%")])
+        .map_err(db_err)?;
+    let mut latest = HashMap::new();
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let source_id: String = row.get(0).map_err(db_err)?;
+        let wall_ns: Option<i64> = row.get(1).map_err(db_err)?;
+        if let Some(wall_ns) = wall_ns.filter(|value| *value > 0) {
+            latest.insert(source_id, wall_ns);
+        }
+    }
+    Ok(latest)
+}
+
 /// Query logs with bounded filters.
 pub fn logs(conn: &Connection, filter: &LogFilter) -> Result<Vec<LogRecord>> {
     let window = filter.window.unwrap_or(Window {

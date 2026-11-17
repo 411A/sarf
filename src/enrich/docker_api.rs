@@ -287,6 +287,15 @@ impl DockerApi {
                 }
             }
         }
+        if raw.is_empty() && truncated {
+            // The socket accepted the connection but the daemon did not answer
+            // inside the timeout. Saying "malformed input" here was misleading:
+            // a busy daemon is a coverage problem, not a parser problem.
+            return Err(Error::unavailable(
+                "Docker Engine API",
+                format!("no response within {:?}", self.timeout),
+            ));
+        }
         let mut response = parse_http_response(&raw, max_bytes)?;
         response.truncated |= truncated;
         if !(200..300).contains(&response.status) {

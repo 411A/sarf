@@ -422,10 +422,24 @@ fn story_groups_actors_and_related_evidence_deterministically() {
     )
     .expect("stories");
     assert!(!document.groups.is_empty(), "expected a correlated group");
+    assert_eq!(document.schema_version, 2);
+    assert!(
+        document.window_count >= document.group_count,
+        "grouping must never create more groups than windows"
+    );
+    assert!(
+        document
+            .groups
+            .iter()
+            .all(|group| !group.metrics.is_empty()),
+        "every group keeps at least one metric"
+    );
     let group = document
         .groups
         .iter()
-        .find(|group| group.metric == "cpu" && group.kind == "high")
+        .find(|group| {
+            group.kind == "high" && group.metrics.iter().any(|metric| metric.metric == "cpu")
+        })
         .expect("high CPU group");
     assert!(group
         .actors
@@ -436,10 +450,57 @@ fn story_groups_actors_and_related_evidence_deterministically() {
         .iter()
         .flat_map(|actor| &actor.logs)
         .chain(group.logs.iter())
-        .any(|log| log.message.contains("timed out"));
+        .any(|line| line.first.message.contains("timed out"));
     assert!(has_log, "related logs should be grouped with the window");
+    assert!(
+        group
+            .actors
+            .iter()
+            .flat_map(|actor| &actor.logs)
+            .chain(group.logs.iter())
+            .all(|line| line.repeats >= 1),
+        "folded lines count their occurrences"
+    );
     let json = serde_json::to_string(&document).expect("json");
-    assert!(json.contains("\"schema_version\":1"));
+    assert!(json.contains("\"schema_version\":2"));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json value");
+    let first = value["groups"]
+        .as_array()
+        .and_then(|groups| groups.first())
+        .expect("at least one group");
+    for key in [
+        "group_id",
+        "kind",
+        "start_wall_ns",
+        "end_wall_ns",
+        "primary_metric",
+        "confidence",
+        "metrics",
+        "host",
+        "actors",
+        "process_links",
+        "process_link_total",
+        "process_link_omitted",
+        "logs",
+        "events",
+        "evidence",
+    ] {
+        assert!(first.get(key).is_some(), "story group missing {key}");
+    }
+    let metrics = first["metrics"].as_array().expect("metrics array");
+    assert!(!metrics.is_empty(), "a group keeps every merged metric");
+    assert!(
+        metrics[0].get("contributors").is_some(),
+        "each metric keeps its own ranked contributors"
+    );
+    let links = first["process_links"].as_array().expect("links array");
+    let total = first["process_link_total"].as_u64().expect("link total");
+    assert!(total >= links.len() as u64);
+    assert_eq!(
+        total - links.len() as u64,
+        first["process_link_omitted"].as_u64().expect("omitted"),
+        "retained plus omitted must equal the overlapping total"
+    );
     let again = serde_json::to_string(
         &sarf::analysis::story::build_stories(
             seeded.store.connection(),

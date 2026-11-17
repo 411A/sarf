@@ -104,6 +104,10 @@ struct Enrichment {
     docker_event_ns: i64,
     #[cfg(unix)]
     docker_log_cursors: HashMap<String, i64>,
+    /// Cursors restored from the database so a restart does not re-read the last
+    /// `tail` lines of every container (that produced duplicated log rows).
+    #[cfg(unix)]
+    docker_log_seed: HashMap<String, i64>,
     /// Whether a Docker availability gap was already reported in this run.
     docker_error_reported: bool,
     force_discovery: bool,
@@ -126,6 +130,8 @@ impl Default for Enrichment {
             docker_event_ns: 0,
             #[cfg(unix)]
             docker_log_cursors: HashMap::new(),
+            #[cfg(unix)]
+            docker_log_seed: HashMap::new(),
             docker_error_reported: false,
             force_discovery: false,
         }
@@ -437,6 +443,12 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         options.config.process.store_arguments,
         catalog.clone(),
     );
+    #[cfg(unix)]
+    let mut enrichment = Enrichment {
+        docker_log_seed: seed_docker_log_cursors(&store)?,
+        ..Enrichment::default()
+    };
+    #[cfg(not(unix))]
     let mut enrichment = Enrichment::default();
     #[cfg(unix)]
     if options.config.integrations.docker.should_attempt() {
@@ -1517,6 +1529,20 @@ fn docker_event_kind(action: &str) -> (EventKind, Severity) {
 }
 
 #[cfg(unix)]
+fn seed_docker_log_cursors(store: &Store) -> Result<HashMap<String, i64>> {
+    use crate::store::query;
+
+    Ok(query::latest_log_wall_ns(store.connection(), "docker:")?
+        .into_iter()
+        .filter_map(|(source_id, wall_ns)| {
+            source_id
+                .strip_prefix("docker:")
+                .map(|name| (name.to_string(), wall_ns))
+        })
+        .collect())
+}
+
+#[cfg(unix)]
 fn poll_docker_logs(
     enrichment: &mut Enrichment,
     config: &Config,
@@ -1563,7 +1589,11 @@ fn poll_docker_logs(
             health.dropped("docker_logs", 1);
             continue;
         }
-        let cursor = enrichment.docker_log_cursors.get(&container.id).copied();
+        let cursor = enrichment
+            .docker_log_cursors
+            .get(&container.id)
+            .copied()
+            .or_else(|| enrichment.docker_log_seed.get(&container.name).copied());
         if cursor.is_some() && container.state != "running" {
             // A stopped/paused container cannot append logs; its existing evidence is
             // already in the ring/SQLite. Poll again only if it starts.
