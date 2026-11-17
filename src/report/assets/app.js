@@ -320,8 +320,8 @@
     return minutes + 'm ' + secs + 's';
   }
 
-  var fullDateFormatter = makeDateFormatter({ year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-  var shortDateFormatter = makeDateFormatter({ month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  var fullDateFormatter = makeDateFormatter({ year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3, hour12: false });
+  var shortDateFormatter = makeDateFormatter({ month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3, hour12: false });
   var clockFormatter = makeDateFormatter({ hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   var hourFormatter = makeDateFormatter({ hour: '2-digit', minute: '2-digit', hour12: false });
   var dayFormatter = makeDateFormatter({ month: 'short', day: '2-digit' });
@@ -368,7 +368,8 @@
   }
 
   function manualStamp(date, short) {
-    var clock = pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
+    var millis = String(date.getMilliseconds()).padStart(3, '0');
+    var clock = pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds()) + '.' + millis;
     if (short) return date.toLocaleString(undefined, { month: 'short' }) + ' ' + pad2(date.getDate()) + ', ' + clock;
     return date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate()) + ' ' + clock;
   }

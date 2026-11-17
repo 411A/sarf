@@ -188,13 +188,13 @@ impl DockerApi {
         let filter = url_encode(r#"{"type":["container"]}"#);
         let mut path = format!("{}/events?filters={filter}", self.prefix);
         if let Some(since) = since_ns.filter(|value| *value > 0) {
-            // Docker's events/logs endpoints expect Unix seconds for this parameter;
-            // RFC3339 with a fractional part is rejected by some daemon versions.
+            // Docker accepts Unix seconds with an optional fractional part but
+            // rejects RFC3339 values on some daemon versions. Keep nanoseconds.
             path.push_str("&since=");
-            path.push_str(&since_seconds(since).to_string());
+            path.push_str(&docker_timestamp(since));
         }
         path.push_str("&until=");
-        path.push_str(&(until_ns / 1_000_000_000).saturating_add(1).to_string());
+        path.push_str(&docker_timestamp(until_ns));
         let response = self.get(&path, MAX_EVENT_BYTES)?;
         Ok(parse_events(&response.body))
     }
@@ -220,11 +220,11 @@ impl DockerApi {
             self.prefix
         );
         if let Some(since) = since_ns.filter(|value| *value > 0) {
-            // Use integer Unix seconds. The daemon rejects RFC3339 values with a
-            // fractional part here; the caller filters returned lines back to the
-            // original nanosecond cursor, so the one-second overlap is harmless.
+            // Unix seconds plus nanoseconds is accepted by the daemon; RFC3339 with
+            // a fractional part is rejected by some versions. The caller also filters
+            // returned lines against the original nanosecond cursor.
             path.push_str("&since=");
-            path.push_str(&since_seconds(since).to_string());
+            path.push_str(&docker_timestamp(since));
         }
         let response = self.get(&path, max_bytes)?;
         Ok(parse_logs(&response.body, tty, response.truncated))
@@ -669,12 +669,19 @@ fn parse_events(body: &[u8]) -> Vec<DockerEvent> {
     events
 }
 
-/// Docker `since` parameter in integer Unix seconds.
+/// Docker time parameter as Unix seconds plus an optional nanosecond fraction.
 ///
-/// Subtract one second so a cursor just after a second boundary cannot skip a
-/// record. Callers filter returned records against the original nanosecond cursor.
-const fn since_seconds(since_ns: i64) -> i64 {
-    (since_ns / 1_000_000_000).saturating_sub(1)
+/// Docker rejects RFC3339 timestamps with a fractional part on some versions, but
+/// accepts the equivalent `seconds.nanoseconds` form. Keeping the fraction avoids
+/// losing millisecond/sub-millisecond cursors.
+fn docker_timestamp(wall_ns: i64) -> String {
+    let seconds = wall_ns.div_euclid(1_000_000_000);
+    let nanos = wall_ns.rem_euclid(1_000_000_000);
+    if nanos == 0 {
+        seconds.to_string()
+    } else {
+        format!("{seconds}.{nanos:09}")
+    }
 }
 
 fn parse_logs(body: &[u8], tty: bool, mut truncated: bool) -> DockerLogBatch {
@@ -1078,10 +1085,16 @@ mod tests {
     }
 
     #[test]
-    fn docker_since_uses_integer_seconds() {
-        assert_eq!(since_seconds(1_700_000_000_123_456_789), 1_699_999_999);
-        assert_eq!(since_seconds(1_700_000_000_999_999_999), 1_699_999_999);
-        assert_eq!(since_seconds(1_000_000_001), 0);
+    fn docker_timestamps_keep_nanosecond_precision() {
+        assert_eq!(
+            docker_timestamp(1_700_000_000_123_456_789),
+            "1700000000.123456789"
+        );
+        assert_eq!(
+            docker_timestamp(1_700_000_000_999_999_999),
+            "1700000000.999999999"
+        );
+        assert_eq!(docker_timestamp(1_700_000_000_000_000_000), "1700000000");
     }
 
     #[test]

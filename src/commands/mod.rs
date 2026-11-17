@@ -145,9 +145,12 @@ pub fn fmt_time(wall_ns: i64) -> String {
         return "-".to_string();
     }
     let local = Local
-        .timestamp_opt(wall_ns / 1_000_000_000, 0)
+        .timestamp_opt(
+            wall_ns.div_euclid(1_000_000_000),
+            wall_ns.rem_euclid(1_000_000_000) as u32,
+        )
         .earliest()
-        .map(|stamp| stamp.format("%Y-%m-%d %H:%M:%S").to_string());
+        .map(|stamp| stamp.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
     local.unwrap_or_else(|| format_wall_rfc3339(wall_ns))
 }
 
@@ -368,6 +371,12 @@ mod tests {
         assert_eq!(fmt_pct(None), "-");
         assert_eq!(fmt_pct(Some(f64::NAN)), "-");
         assert_eq!(fmt_pct(Some(12.34)), "12.3%");
+    }
+
+    #[test]
+    fn table_times_keep_milliseconds() {
+        let text = fmt_time(1_767_225_600_123_000_000);
+        assert!(text.contains(".123"), "expected milliseconds: {text}");
     }
 
     #[test]
