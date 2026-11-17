@@ -250,6 +250,8 @@ pub enum WriteRecord {
     LogSource(LogSourceRow),
     /// Coverage gap (open or refresh).
     Gap(CoverageGap),
+    /// Peak dossier upsert (one compact JSON document per detected peak).
+    PeakDossier(PeakDossierRow),
     /// Coverage gap resolution.
     GapResolved {
         /// Source id.
@@ -271,6 +273,30 @@ pub const MAX_EVIDENCE_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_LOG_STORED_BYTES: usize = 16 * 1024;
 /// Maximum bytes stored in entity labels JSON.
 pub const MAX_LABELS_JSON_BYTES: usize = 32 * 1024;
+
+/// One stored peak dossier (see `analysis::peaks`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeakDossierRow {
+    /// Stable id: scope entity, metric and episode start.
+    pub peak_id: String,
+    /// Episode start.
+    pub started_wall_ns: i64,
+    /// Episode end.
+    pub ended_wall_ns: i64,
+    /// Metric name.
+    pub metric: String,
+    /// Entity the peak was detected on.
+    pub scope_entity_id: String,
+    /// Detection score (peak / baseline p99, floor 1.0).
+    pub score: f64,
+    /// When the dossier was produced.
+    pub created_wall_ns: i64,
+    /// Compact JSON payload (`sarf.peak` document fragment).
+    pub payload_json: String,
+}
+
+/// Maximum bytes stored for one peak dossier JSON.
+pub const MAX_PEAK_JSON_BYTES: usize = 128 * 1024;
 
 impl Store {
     /// Open (or create) the database at `path`, apply pragmas and migrations.
@@ -392,6 +418,10 @@ impl Store {
             if version < 2 {
                 tx.execute_batch(schema::MIGRATION_2)
                     .map_err(|err| Error::Storage(format!("apply schema v2: {err}")))?;
+            }
+            if version < 3 {
+                tx.execute_batch(schema::MIGRATION_3)
+                    .map_err(|err| Error::Storage(format!("apply schema v3: {err}")))?;
             }
             tx.execute_batch(&format!(
                 "PRAGMA user_version = {};",
@@ -947,6 +977,30 @@ impl Store {
                 .execute(params![source_id, kind, detail, resolved_wall_ns])
                 .map_err(map)?;
             }
+            WriteRecord::PeakDossier(dossier) => {
+                tx.prepare_cached(
+                    "INSERT INTO peak_dossiers(peak_id, started_wall_ns, ended_wall_ns, metric,
+                                               scope_entity_id, score, created_wall_ns, payload_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(peak_id) DO UPDATE SET
+                        ended_wall_ns = excluded.ended_wall_ns,
+                        score = excluded.score,
+                        created_wall_ns = excluded.created_wall_ns,
+                        payload_json = excluded.payload_json",
+                )
+                .map_err(map)?
+                .execute(params![
+                    dossier.peak_id,
+                    dossier.started_wall_ns,
+                    dossier.ended_wall_ns,
+                    dossier.metric,
+                    dossier.scope_entity_id,
+                    dossier.score,
+                    dossier.created_wall_ns,
+                    truncate_utf8(&dossier.payload_json, MAX_PEAK_JSON_BYTES).0,
+                ])
+                .map_err(map)?;
+            }
         }
         Ok(())
     }
@@ -1090,7 +1144,7 @@ mod tests {
     #[test]
     fn migration_sets_version() {
         let store = store();
-        assert_eq!(store.schema_version().expect("version"), 2);
+        assert_eq!(store.schema_version().expect("version"), 3);
     }
 
     #[test]
@@ -1104,7 +1158,7 @@ mod tests {
             path: PathBuf::from(":memory:"),
         };
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), 2);
+        assert_eq!(store.schema_version().expect("version"), 3);
         let mut statement = store
             .connection()
             .prepare("PRAGMA table_info(cgroup_samples)")
@@ -1478,7 +1532,7 @@ mod tests {
                 .expect("write");
         }
         let reopened = Store::open(&path).expect("reopen");
-        assert_eq!(reopened.schema_version().expect("version"), 2);
+        assert_eq!(reopened.schema_version().expect("version"), 3);
         assert_eq!(reopened.meta_get("k").expect("meta").as_deref(), Some("v"));
     }
 }

@@ -84,6 +84,23 @@ rollup_1h_days = 90
 incident_days = 180
 log_days = 7
 
+[peaks]
+# Peak dossiers are compact JSON documents for machine/agent analysis. A peak
+# is relative to the entity's own rolling baseline, not an absolute threshold.
+enabled = true
+retain_hours = 72
+# Rolling baseline window: the level that becomes normal stops being a peak.
+baseline_mins = 60
+# Robustness: exceed the baseline median by this many MADs (plus a per-metric
+# floor) and the baseline p99, otherwise it is noise.
+mad_k = 3.0
+# Consecutive 1-minute buckets required to report a peak.
+min_sustain = 1
+max_peaks = 20
+max_nodes = 16
+series_mins = 10
+detect_mins = 30
+
 [integrations]
 docker = "auto"
 tmux = "auto"

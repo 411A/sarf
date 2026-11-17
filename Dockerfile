@@ -45,7 +45,7 @@ RUN cargo test --release --all-targets --locked
 # Runtime stage.
 FROM debian:bookworm-slim AS runtime
 
-ARG SARF_VERSION=0.1.10
+ARG SARF_VERSION=0.1.11
 
 LABEL org.opencontainers.image.title="SARF" \
       org.opencontainers.image.description="Lightweight Linux process, service and activity forensics" \

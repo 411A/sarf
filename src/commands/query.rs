@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::analysis::{correlation, story as story_analysis};
+use crate::analysis::{correlation, peaks as peaks_analysis, story as story_analysis};
 use crate::cli::ByMetric;
 use crate::commands::{
     fmt_bytes, fmt_clock, fmt_pct, fmt_span, fmt_time, print_json, print_table, Context,
@@ -894,6 +894,53 @@ fn story_value(metric: &str, value: f64) -> String {
         "load" => format!("{value:.2}"),
         _ => fmt_pct(Some(value)),
     }
+}
+
+/// Emit the machine-readable peak document.
+///
+/// This is an agent artifact, not a human report: it is always JSON, one line of
+/// output, with no labels or padding. `--stored` reads the dossiers the daemon
+/// persisted (they survive raw-sample expiry); the default detects now.
+pub fn peaks(
+    context: &Context,
+    since: &str,
+    stored: bool,
+    output: Option<&std::path::Path>,
+) -> Result<i32> {
+    let store = context.open_read()?;
+    let window = context.window(since)?;
+    let policy = peaks_analysis::PeakPolicy::from_config(&context.config);
+    let text = if stored {
+        serde_json::to_string(&peaks_analysis::stored_document(
+            store.connection(),
+            window,
+            10_000,
+        )?)
+    } else if policy.enabled {
+        serde_json::to_string(&peaks_analysis::document(
+            store.connection(),
+            window,
+            &policy,
+        )?)
+    } else {
+        // Disabled is not "no peaks": say so explicitly instead of emitting [].
+        serde_json::to_string(&serde_json::json!({
+            "schema": peaks_analysis::PEAK_SCHEMA,
+            "v": peaks_analysis::PEAK_SCHEMA_VERSION,
+            "enabled": false,
+            "since_wall_ns": window.since,
+            "until_wall_ns": window.until,
+        }))
+    }
+    .map_err(|err| Error::Storage(format!("serialize peaks: {err}")))?;
+    match output {
+        Some(path) => {
+            std::fs::write(path, format!("{text}\n"))
+                .map_err(|err| Error::io(path.to_path_buf(), err))?;
+        }
+        None => println!("{text}"),
+    }
+    Ok(0)
 }
 
 /// List incidents.

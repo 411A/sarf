@@ -328,6 +328,7 @@ fn prepare_report(seeded: &mut Seeded) -> report::ReportDocument {
         rollup_1h_days: 90,
         incident_days: 180,
         log_days: 7,
+        peak_hours: 72,
         max_db_bytes: u64::MAX,
         clock_ticks_per_second: 100,
     };

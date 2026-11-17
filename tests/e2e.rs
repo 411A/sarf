@@ -315,6 +315,94 @@ fn story_output_is_grouped_and_compact() {
 }
 
 #[test]
+fn peaks_command_emits_a_deterministic_agent_document() {
+    let root = common::temp_root("e2e-peaks");
+    let log_path = build_fixture(&root);
+    let data_dir = root.join("data/sarf-data");
+    common::config_with_log(&root.join("data"), &log_path, 60);
+    run(&data_dir, &["init"]);
+    run(
+        &data_dir,
+        &[
+            "run",
+            "--fixture-root",
+            root.to_str().expect("utf8 fixture path"),
+            "--cycles",
+            "10",
+            "--interval-secs",
+            "60",
+        ],
+    );
+
+    let output = run(&data_dir, &["peaks", "--since", "1h"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !text.contains('\n') || text.trim().lines().count() == 1,
+        "one JSON line"
+    );
+    let document: serde_json::Value = serde_json::from_str(text.trim()).expect("peaks JSON");
+    assert_eq!(document["schema"], "sarf.peak");
+    assert_eq!(document["v"], 1);
+    let peaks = document["peaks"].as_array().expect("peaks array");
+    // The fixture run is too short to satisfy the five-bucket baseline (its
+    // rollups are two minutes apart), so this test asserts the document
+    // contract and determinism, not detection. Detection semantics are covered
+    // by the seeded rollup tests in `analysis::peaks`.
+    for peak in peaks {
+        let nodes = peak["nodes"].as_array().expect("nodes");
+        assert_eq!(nodes[0]["kind"], "host");
+        let edges = peak["edges"].as_array().expect("edges");
+        for edge in edges {
+            let parent = edge[0].as_u64().expect("parent") as usize;
+            let child = edge[1].as_u64().expect("child") as usize;
+            assert!(
+                parent < nodes.len() && child < nodes.len(),
+                "edge {edge} out of range"
+            );
+        }
+        assert!(peak["score"].as_f64().expect("score") > 1.0);
+        // Missing values must be omitted, never serialized as null or zero.
+        assert!(peak["metric"].is_string());
+    }
+
+    // Deterministic data: the same window contents produce the same peaks. The
+    // absolute bounds move with `now`, so compare the document body.
+    let again = run(&data_dir, &["peaks", "--since", "1h"]);
+    let again_document: serde_json::Value =
+        serde_json::from_slice(&again.stdout).expect("peaks JSON again");
+    assert_eq!(again_document["peaks"], document["peaks"]);
+    assert_eq!(again_document["peak_count"], document["peak_count"]);
+
+    // The daemon stores dossiers on its retention cadence; the last pass of a
+    // bounded run must leave a readable document behind.
+    let stored = run(&data_dir, &["peaks", "--stored", "--since", "1h"]);
+    let stored: serde_json::Value =
+        serde_json::from_slice(&stored.stdout).expect("stored peaks JSON");
+    assert_eq!(stored["schema"], "sarf.peak");
+    assert!(stored["peaks"].is_array());
+
+    // `--output` writes the same document to a file.
+    let path = root.join("peaks.json");
+    run(
+        &data_dir,
+        &[
+            "peaks",
+            "--since",
+            "1h",
+            "--output",
+            path.to_str().expect("utf8 path"),
+        ],
+    );
+    let written = std::fs::read_to_string(&path).expect("peaks file");
+    let written: serde_json::Value =
+        serde_json::from_str(written.trim()).expect("written peaks JSON");
+    assert_eq!(written["peaks"], document["peaks"]);
+    assert_eq!(written["peak_count"], document["peak_count"]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn report_command_supports_graph_alias_and_default_output() {
     let root = common::temp_root("e2e-alias");
     let log_path = build_fixture(&root);

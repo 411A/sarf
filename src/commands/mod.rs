@@ -365,6 +365,11 @@ pub fn main() -> Result<i32> {
             output,
         } => export::export(&context, since, *format, output.as_deref()),
         Command::Prune => system::prune(&mut context),
+        Command::Peaks {
+            since,
+            stored,
+            output,
+        } => query::peaks(&context, since, *stored, output.as_deref()),
         Command::Benchmark {
             cycles,
             fixture_root,

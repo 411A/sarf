@@ -51,6 +51,8 @@ pub struct RetentionPolicy {
     pub incident_days: u64,
     /// Log days.
     pub log_days: u64,
+    /// Peak dossier hours (`[peaks].retain_hours`).
+    pub peak_hours: u64,
     /// Database budget in bytes (main file + WAL + report files).
     pub max_db_bytes: u64,
     /// Clock ticks per second used to convert process CPU ticks to microseconds.
@@ -67,6 +69,7 @@ impl RetentionPolicy {
             rollup_1h_days: config.retention.rollup_1h_days,
             incident_days: config.retention.incident_days,
             log_days: config.retention.log_days,
+            peak_hours: config.peaks.retain_hours,
             max_db_bytes: config.general.max_db_mb.saturating_mul(1024 * 1024),
             clock_ticks_per_second: clock_ticks_per_second.max(1),
         }
@@ -102,6 +105,8 @@ pub struct PruneReport {
     pub deleted_rollup_1m: u64,
     /// Hour rollup rows deleted.
     pub deleted_rollup_1h: u64,
+    /// Peak dossiers deleted.
+    pub deleted_peaks: u64,
     /// Disk-guard escalation steps applied (empty when inside budget).
     pub pressure_steps: Vec<String>,
     /// Whether a one-time `VACUUM` converted the database to incremental
@@ -132,6 +137,7 @@ impl PruneReport {
             self.deleted_relationships,
             self.deleted_rollup_1m,
             self.deleted_rollup_1h,
+            self.deleted_peaks,
         ]
         .into_iter()
         .sum()
@@ -223,6 +229,11 @@ pub fn prune(
         &tx,
         "DELETE FROM rollup_1h WHERE bucket_wall_ns < ?1",
         params![now_wall_ns - (policy.rollup_1h_days as i64) * 24 * HOUR_NS],
+    )?;
+    report.deleted_peaks = exec(
+        &tx,
+        "DELETE FROM peak_dossiers WHERE ended_wall_ns < ?1",
+        params![now_wall_ns - (policy.peak_hours as i64) * HOUR_NS],
     )?;
     tx.commit()
         .map_err(|err| Error::Storage(format!("commit prune: {err}")))?;
@@ -1053,6 +1064,7 @@ mod tests {
             rollup_1h_days: 3,
             incident_days: 4,
             log_days: 1,
+            peak_hours: 72,
             max_db_bytes: u64::MAX,
             clock_ticks_per_second: clock_ticks,
         }

@@ -10,7 +10,7 @@
 //! and tested against a fresh database and against an existing one.
 
 /// Current schema version. Increment when adding a migration.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Version-1 schema.
 pub const MIGRATION_1: &str = r"
@@ -332,6 +332,26 @@ ALTER TABLE cgroup_samples ADD COLUMN net_rx_dropped INTEGER;
 ALTER TABLE cgroup_samples ADD COLUMN net_tx_dropped INTEGER;
 ";
 
+/// Version-3 migration: stored peak dossiers.
+///
+/// A dossier is one compact JSON document describing a detected peak, its
+/// cascade graph and the surrounding series. It is self-contained so it stays
+/// readable after raw samples expire; `retention.peak_hours` bounds the table.
+pub const MIGRATION_3: &str = r"
+CREATE TABLE IF NOT EXISTS peak_dossiers (
+    peak_id          TEXT PRIMARY KEY,
+    started_wall_ns  INTEGER NOT NULL,
+    ended_wall_ns    INTEGER NOT NULL,
+    metric           TEXT NOT NULL,
+    scope_entity_id  TEXT NOT NULL,
+    score            REAL NOT NULL,
+    created_wall_ns  INTEGER NOT NULL,
+    payload_json     TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS peak_dossiers_start ON peak_dossiers(started_wall_ns);
+CREATE INDEX IF NOT EXISTS peak_dossiers_scope ON peak_dossiers(scope_entity_id, started_wall_ns);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,7 +409,7 @@ mod tests {
             assert!(MIGRATION_2.contains(column), "missing {column}");
         }
         assert!(!MIGRATION_2.contains("REFERENCES"));
-        assert_eq!(SCHEMA_VERSION, 2);
+        assert_eq!(SCHEMA_VERSION, 3);
     }
 
     #[test]

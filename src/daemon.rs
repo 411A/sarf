@@ -1744,6 +1744,8 @@ fn prune(
     now_wall_ns: WallNs,
     health: &mut HealthRegistry,
 ) {
+    use crate::store::query::Window;
+
     // Retention needs mutable access to one connection; flush the writer and use a
     // short-lived second connection for the rollup transaction.
     if let Err(err) = writer.flush() {
@@ -1751,9 +1753,15 @@ fn prune(
         return;
     }
     let policy = RetentionPolicy::from_config(&options.config, 100);
-    match Store::open(&options.data_dir.db_path()).and_then(|mut store| {
-        crate::store::retention::prune(&mut store, &policy, now_wall_ns, options.data_dir.root())
-    }) {
+    let mut store = match Store::open(&options.data_dir.db_path()) {
+        Ok(store) => store,
+        Err(err) => {
+            health.error("retention", now_wall_ns, &err.to_string());
+            return;
+        }
+    };
+    match crate::store::retention::prune(&mut store, &policy, now_wall_ns, options.data_dir.root())
+    {
         Ok(report) => {
             health.success("retention", now_wall_ns);
             health.coverage(
@@ -1768,11 +1776,36 @@ fn prune(
                     "deleted_logs": report.deleted_logs,
                     "deleted_events": report.deleted_events,
                     "deleted_incidents": report.deleted_incidents,
+                    "deleted_peaks": report.deleted_peaks,
                     "pressure_steps": report.pressure_steps,
                 }),
             );
         }
         Err(err) => health.error("retention", now_wall_ns, &err.to_string()),
+    }
+
+    // Peak dossiers: detect over the recent window and upsert them. The writer is
+    // flushed and this short-lived connection owns the database for the pass, so
+    // it is the same safe window retention just used.
+    if options.config.peaks.enabled {
+        let peaks = crate::analysis::peaks::PeakPolicy::from_config(&options.config);
+        let window = Window::new(now_wall_ns.saturating_sub(peaks.detect_ns), now_wall_ns);
+        match crate::analysis::peaks::build_dossiers(store.connection(), window, &peaks) {
+            Ok(dossiers) if !dossiers.is_empty() => {
+                let mut items = Vec::with_capacity(dossiers.len());
+                for dossier in &dossiers {
+                    match crate::analysis::peaks::dossier_row(dossier, now_wall_ns) {
+                        Ok(row) => items.push(WriteItem::normal(WriteRecord::PeakDossier(row))),
+                        Err(err) => health.error("peaks", now_wall_ns, &err.to_string()),
+                    }
+                }
+                if let Err(err) = store.write(&items) {
+                    health.error("peaks", now_wall_ns, &err.to_string());
+                }
+            }
+            Ok(_) => {}
+            Err(err) => health.error("peaks", now_wall_ns, &err.to_string()),
+        }
     }
 }
 

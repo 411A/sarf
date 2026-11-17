@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::model::{
@@ -321,6 +322,8 @@ pub struct LifetimeSummary {
     pub container: Option<String>,
     /// Session.
     pub session: Option<String>,
+    /// cgroup entity this process belongs to.
+    pub cgroup_entity_id: Option<String>,
     /// Start wall clock.
     pub start_wall_ns: i64,
     /// End wall clock (`None` while alive or when the exit was missed).
@@ -1730,6 +1733,26 @@ pub fn incident(conn: &Connection, incident_id: i64) -> Result<Option<Incident>>
     }
 }
 
+/// Host entity id and display name, newest first.
+pub fn host_entity(conn: &Connection) -> Result<Option<(String, String)>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT entity_id, name FROM entities
+              WHERE kind = 'host'
+              ORDER BY last_seen_wall_ns DESC
+              LIMIT 1",
+        )
+        .map_err(db_err)?;
+    let mut rows = statement.query([]).map_err(db_err)?;
+    match rows.next().map_err(db_err)? {
+        Some(row) => Ok(Some((
+            row.get(0).map_err(db_err)?,
+            row.get(1).map_err(db_err)?,
+        ))),
+        None => Ok(None),
+    }
+}
+
 /// Newest stored raw host sample timestamp, or `None` when nothing is stored.
 ///
 /// Uses the `host_samples` time index, so a startup probe is O(log n) instead of
@@ -1739,6 +1762,191 @@ pub fn latest_sample_wall_ns(conn: &Connection) -> Result<Option<i64>> {
         row.get::<_, Option<i64>>(0)
     })
     .map_err(db_err)
+}
+
+/// One 1-minute rollup row with the columns peak detection needs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RollupPoint {
+    /// Bucket start (wall clock).
+    pub bucket_wall_ns: i64,
+    /// Samples aggregated into the bucket.
+    pub sample_count: i64,
+    /// Peak CPU percent of one core.
+    pub cpu_max_pct: Option<f64>,
+    /// Peak memory bytes.
+    pub memory_max_bytes: Option<u64>,
+    /// Bytes read.
+    pub io_read_bytes: Option<u64>,
+    /// Bytes written.
+    pub io_write_bytes: Option<u64>,
+    /// Bytes received.
+    pub net_rx_bytes: Option<u64>,
+    /// Bytes transmitted.
+    pub net_tx_bytes: Option<u64>,
+    /// Peak CPU pressure.
+    pub psi_cpu_max: Option<f64>,
+    /// Peak memory pressure.
+    pub psi_mem_max: Option<f64>,
+    /// Peak I/O pressure.
+    pub psi_io_max: Option<f64>,
+}
+
+/// Entities that have at least one 1-minute rollup row in the window.
+pub fn rollup_entities(conn: &Connection, window: Window) -> Result<Vec<(String, String)>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT entity_id, entity_kind
+               FROM rollup_1m
+              WHERE bucket_wall_ns >= ?1 AND bucket_wall_ns < ?2
+              ORDER BY entity_kind, entity_id",
+        )
+        .map_err(db_err)?;
+    let mut rows = statement
+        .query(params![window.since, window.until])
+        .map_err(db_err)?;
+    let mut entities = Vec::new();
+    while let Some(row) = rows.next().map_err(db_err)? {
+        entities.push((
+            row.get::<_, String>(0).map_err(db_err)?,
+            row.get::<_, String>(1).map_err(db_err)?,
+        ));
+    }
+    Ok(entities)
+}
+
+/// Ordered 1-minute rollups for one entity.
+pub fn rollup_series(
+    conn: &Connection,
+    entity_id: &str,
+    window: Window,
+) -> Result<Vec<RollupPoint>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT bucket_wall_ns, sample_count, cpu_max_pct, memory_max_bytes,
+                    io_read_bytes, io_write_bytes, net_rx_bytes, net_tx_bytes,
+                    psi_cpu_max, psi_mem_max, psi_io_max
+               FROM rollup_1m
+              WHERE entity_id = ?1 AND bucket_wall_ns >= ?2 AND bucket_wall_ns < ?3
+              ORDER BY bucket_wall_ns ASC",
+        )
+        .map_err(db_err)?;
+    let mut rows = statement
+        .query(params![entity_id, window.since, window.until])
+        .map_err(db_err)?;
+    let mut points = Vec::new();
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let bytes = |index: usize| -> Result<Option<u64>> {
+            Ok(row
+                .get::<_, Option<i64>>(index)
+                .map_err(db_err)?
+                .and_then(|value| u64::try_from(value).ok()))
+        };
+        points.push(RollupPoint {
+            bucket_wall_ns: row.get(0).map_err(db_err)?,
+            sample_count: row.get(1).map_err(db_err)?,
+            cpu_max_pct: row.get(2).map_err(db_err)?,
+            memory_max_bytes: bytes(3)?,
+            io_read_bytes: bytes(4)?,
+            io_write_bytes: bytes(5)?,
+            net_rx_bytes: bytes(6)?,
+            net_tx_bytes: bytes(7)?,
+            psi_cpu_max: row.get(8).map_err(db_err)?,
+            psi_mem_max: row.get(9).map_err(db_err)?,
+            psi_io_max: row.get(10).map_err(db_err)?,
+        });
+    }
+    Ok(points)
+}
+
+/// Event and log activity inside one window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct WindowActivity {
+    /// `process_started` events.
+    pub process_starts: u64,
+    /// `process_exited` events.
+    pub process_exits: u64,
+    /// All stored events.
+    pub events: u64,
+    /// All stored log lines.
+    pub logs: u64,
+    /// Log lines at error or critical level.
+    pub errors: u64,
+}
+
+/// Count events and logs inside a window with indexed queries only.
+pub fn window_activity(conn: &Connection, window: Window) -> Result<WindowActivity> {
+    let count = |sql: &str| -> Result<u64> {
+        conn.query_row(sql, params![window.since, window.until], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|value| value.max(0) as u64)
+        .map_err(db_err)
+    };
+    Ok(WindowActivity {
+        process_starts: count(
+            "SELECT COUNT(*) FROM events WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2 AND kind = 'process_started'",
+        )?,
+        process_exits: count(
+            "SELECT COUNT(*) FROM events WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2 AND kind = 'process_exited'",
+        )?,
+        events: count("SELECT COUNT(*) FROM events WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2")?,
+        logs: count("SELECT COUNT(*) FROM logs WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2")?,
+        errors: count(
+            "SELECT COUNT(*) FROM logs WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2 AND level IN ('error','critical')",
+        )?,
+    })
+}
+
+/// One stored peak dossier.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StoredPeak {
+    /// Stable id.
+    pub peak_id: String,
+    /// Episode start.
+    pub started_wall_ns: i64,
+    /// Episode end.
+    pub ended_wall_ns: i64,
+    /// Metric.
+    pub metric: String,
+    /// Scope entity.
+    pub scope_entity_id: String,
+    /// Detection score.
+    pub score: f64,
+    /// Dossier JSON.
+    pub payload_json: String,
+}
+
+/// Stored peak dossiers in a window, oldest first.
+pub fn stored_peaks(conn: &Connection, window: Window, limit: usize) -> Result<Vec<StoredPeak>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT peak_id, started_wall_ns, ended_wall_ns, metric, scope_entity_id, score, payload_json
+               FROM peak_dossiers
+              WHERE started_wall_ns >= ?1 AND started_wall_ns < ?2
+              ORDER BY started_wall_ns ASC, metric ASC, scope_entity_id ASC
+              LIMIT ?3",
+        )
+        .map_err(db_err)?;
+    let mut rows = statement
+        .query(params![
+            window.since,
+            window.until,
+            limit.clamp(1, 10_000) as i64
+        ])
+        .map_err(db_err)?;
+    let mut peaks = Vec::new();
+    while let Some(row) = rows.next().map_err(db_err)? {
+        peaks.push(StoredPeak {
+            peak_id: row.get(0).map_err(db_err)?,
+            started_wall_ns: row.get(1).map_err(db_err)?,
+            ended_wall_ns: row.get(2).map_err(db_err)?,
+            metric: row.get(3).map_err(db_err)?,
+            scope_entity_id: row.get(4).map_err(db_err)?,
+            score: row.get(5).map_err(db_err)?,
+            payload_json: row.get(6).map_err(db_err)?,
+        });
+    }
+    Ok(peaks)
 }
 
 /// Latest stored wall clock per log source whose id starts with `prefix`.
@@ -1892,7 +2100,7 @@ pub fn lifetimes(conn: &Connection, window: Window, limit: usize) -> Result<Vec<
     let mut statement = conn
         .prepare(
             "SELECT process_instance_id, host_pid, parent_process_instance_id, parent_host_pid,
-                    comm, executable, tool, role, unit, container, session,
+                    comm, executable, tool, role, unit, container, session, cgroup_entity_id,
                     start_wall_ns, end_wall_ns, end_reason
                FROM process_lifetimes
               WHERE start_wall_ns < ?2 AND (end_wall_ns IS NULL OR end_wall_ns >= ?1)
@@ -1919,9 +2127,10 @@ pub fn lifetimes(conn: &Connection, window: Window, limit: usize) -> Result<Vec<
             unit: row.get(8).map_err(db_err)?,
             container: row.get(9).map_err(db_err)?,
             session: row.get(10).map_err(db_err)?,
-            start_wall_ns: row.get(11).map_err(db_err)?,
-            end_wall_ns: row.get(12).map_err(db_err)?,
-            end_reason: row.get(13).map_err(db_err)?,
+            cgroup_entity_id: row.get(11).map_err(db_err)?,
+            start_wall_ns: row.get(12).map_err(db_err)?,
+            end_wall_ns: row.get(13).map_err(db_err)?,
+            end_reason: row.get(14).map_err(db_err)?,
         });
     }
     Ok(lifetimes)

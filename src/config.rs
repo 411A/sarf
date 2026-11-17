@@ -405,6 +405,48 @@ impl Default for Retention {
     }
 }
 
+/// Peak detection and agent-oriented dossier settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Peaks {
+    /// Enable peak detection and dossier storage.
+    pub enabled: bool,
+    /// How long peak dossiers are kept, in hours.
+    pub retain_hours: u64,
+    /// Rolling baseline window, in minutes. The baseline moves with the
+    /// workload, so a level that becomes normal stops being a peak.
+    pub baseline_mins: u64,
+    /// Robustness factor: a candidate must exceed the baseline median by
+    /// `mad_k` median absolute deviations (never below a per-metric floor).
+    pub mad_k: f64,
+    /// Consecutive one-minute buckets required to report a peak.
+    pub min_sustain: u64,
+    /// Maximum peaks per document / per stored pass.
+    pub max_peaks: u64,
+    /// Maximum graph nodes retained per peak (host included).
+    pub max_nodes: u64,
+    /// Minutes of history kept before and after each peak in the series.
+    pub series_mins: u64,
+    /// Look-back window used by the daemon on each detection pass.
+    pub detect_mins: u64,
+}
+
+impl Default for Peaks {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retain_hours: 72,
+            baseline_mins: 60,
+            mad_k: 3.0,
+            min_sustain: 1,
+            max_peaks: 20,
+            max_nodes: 16,
+            series_mins: 10,
+            detect_mins: 30,
+        }
+    }
+}
+
 /// Integration switches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -505,6 +547,8 @@ pub struct Config {
     pub thresholds: Thresholds,
     /// Retention windows.
     pub retention: Retention,
+    /// Peak detection and dossiers.
+    pub peaks: Peaks,
     /// Integration switches.
     pub integrations: Integrations,
     /// Report bounds.
@@ -696,6 +740,20 @@ impl Config {
             0.0,
             1_000_000.0,
         )?;
+        let peaks = &self.peaks;
+        check_range("peaks.retain_hours", peaks.retain_hours as f64, 1.0, 8760.0)?;
+        check_range(
+            "peaks.baseline_mins",
+            peaks.baseline_mins as f64,
+            5.0,
+            1440.0,
+        )?;
+        check_range("peaks.mad_k", peaks.mad_k, 1.0, 20.0)?;
+        check_range("peaks.min_sustain", peaks.min_sustain as f64, 1.0, 60.0)?;
+        check_range("peaks.max_peaks", peaks.max_peaks as f64, 1.0, 500.0)?;
+        check_range("peaks.max_nodes", peaks.max_nodes as f64, 2.0, 128.0)?;
+        check_range("peaks.series_mins", peaks.series_mins as f64, 1.0, 120.0)?;
+        check_range("peaks.detect_mins", peaks.detect_mins as f64, 1.0, 240.0)?;
         let retention = &self.retention;
         check_range(
             "retention.raw_hours",

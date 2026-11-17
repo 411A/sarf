@@ -27,4 +27,5 @@
 pub mod correlation;
 pub mod ewma;
 pub mod incidents;
+pub mod peaks;
 pub mod story;

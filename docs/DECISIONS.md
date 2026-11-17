@@ -486,3 +486,47 @@ operator runs, and a crash loop cannot silently consume CPU indefinitely. The
 status line needs no new database state: it derives freshness from the newest
 sample timestamp that retention already preserves.
 
+## ADR-025 - Peaks are relative to a rolling baseline, not thresholds
+
+**Context.** Operators and coding agents asked for "why was the host slow at 14:03"
+in a form a program can reason about: which entity peaked, what carried the cost,
+and what was happening around it. Absolute thresholds fail this: 10 % CPU is a real
+peak on an idle host and irrelevant on a busy one, and 10.5 % is only a peak until
+11 % becomes normal. A flame graph built from sampling stacks is not available in a
+read-only binary without eBPF/perf.
+
+**Decision.** Add `sarf peaks` and a stored dossier per peak:
+
+- candidate = a 1-minute bucket that is `>=` the rolling p99 of the *same* entity
+  and metric over `[peaks].baseline_mins` (60) **and** at least `mad_k` (3) median
+  absolute deviations above the rolling median, with a small per-metric floor. The
+  p99 comparison is `>=` so a sustained plateau keeps extending a run instead of
+  ending after one bucket; the MAD floor stops floating-point jitter from becoming
+  a peak. History is per entity/metric, so a level that becomes the norm stops
+  qualifying and the *transition* is the reported peak.
+- consecutive qualifying buckets form one episode (`spike` when one bucket,
+  `sustained` otherwise), capped by `[peaks].max_peaks`.
+- each dossier is self-contained compact JSON: peak values, a typed graph
+  (`nodes` with host at index 0, cgroups, processes; `edges` labelled `on`/`in`),
+  `share`/`own`, a 1-minute series aligned to a shared grid, and event/log counts.
+  Missing values are omitted (`null` in the series), never zero.
+- `graph` edges do not claim stack attribution: `on` means the child runs on that
+  host/cgroup and does not assert an additive partition (nested cgroups overlap);
+  `in` comes from the stored cgroup membership of a process and is additive, so
+  `own = value - sum(contained children)` is only computed there.
+- the daemon runs detection on its existing retention cadence over
+  `[peaks].detect_mins` (30) and upserts dossiers into `peak_dossiers`; retention
+  deletes them after `[peaks].retain_hours` (72). Dossiers survive raw-sample
+  expiry, so a peak is still explainable after `raw_hours` has passed.
+
+**Consequences.** The artifact is compact (no repeated labels, no indentation, no
+pretty printing), deterministic for the same window contents, and cheap: detection
+reads 1-minute rollups only and runs on the prune cadence. It cannot say which
+function burned CPU; it says which host, cgroup and process did, with the series and
+the surrounding events. When a stack source exists, adding `frames` to a node is
+additive and does not change the document.
+
+**Upgrade path.** Feed `sarf peaks -o peaks.json` to an agent unchanged; add an
+`--explain` mode or eBPF frames later without changing `schema`/`v`.
+
+

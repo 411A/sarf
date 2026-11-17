@@ -181,6 +181,22 @@ pub enum Command {
     /// Run it while the service is stopped: the daemon runs the same pass on
     /// its own cadence and a second writer only makes both wait on locks.
     Prune,
+    /// Emit peak dossiers as machine JSON for agent analysis.
+    ///
+    /// A peak is relative to the entity's own rolling baseline, not an absolute
+    /// threshold. The document carries a typed graph of host, cgroups and
+    /// processes with their values plus a bounded series around each episode.
+    Peaks {
+        /// Window to analyse.
+        #[arg(long, default_value = "72h")]
+        since: String,
+        /// Read dossiers stored by the daemon instead of detecting now.
+        #[arg(long)]
+        stored: bool,
+        /// Write the JSON document to this path instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
     /// Measure bounded collection and database write throughput.
     Benchmark {
         /// Cycles to measure.

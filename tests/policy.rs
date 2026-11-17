@@ -295,6 +295,7 @@ fn incidents_survive_disk_pressure() {
         rollup_1h_days: 2,
         incident_days: 180,
         log_days: 1,
+        peak_hours: 72,
         max_db_bytes: 1,
         clock_ticks_per_second: 100,
     };

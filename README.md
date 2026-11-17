@@ -183,11 +183,52 @@ sarf logs <source|all> [--since 1h] [--grep TEXT] [--level warn]
 sarf report|graph [--since 1h] [--output PATH] [--incident ID] [--service NAME]
 sarf export [--since 24h] [--format csv|json] [--output PATH]
 sarf prune
+sarf peaks [--since 72h] [--stored] [--output PATH]   # machine peak dossiers for agents
 sarf benchmark [--cycles N] [--fixture-root PATH]
 sarf tools list|show ID|search QUERY
 ```
 
 All commands accept global `--data-dir`, `--config` and `--json`.
+
+## Peak dossiers (machine artifact)
+
+`sarf peaks` emits one JSON document built for an analysis agent, not for a human.
+It answers "what was consuming the host, and what is related to it?":
+
+- **Dynamic peaks.** A peak is a bucket that exceeds the *rolling p99* of the same
+  entity and metric and sits at least `[peaks].mad_k` median-absolute-deviations
+  above the rolling median (plus a per-metric floor). A level that becomes the new
+  normal stops qualifying; the transition to it is the peak. No absolute thresholds.
+- **Cascade graph.** Every peak carries `nodes` (host at index 0, then cgroups and the
+  processes that explain them) and typed `edges` (`on` = runs on that host/cgroup,
+  `in` = process is contained in that cgroup). `share` and `own` say how much of the
+  peak each node explains; `own` is only computed where containment is real.
+- **Bounded series.** `series` is a 1-minute grid (`step_ns`, `from_wall_ns`,
+  `points`) and each retained node carries values aligned to it. A missing bucket is
+  `null`, never `0`.
+- **72-hour retention.** The daemon detects peaks on its retention cadence and stores
+  compact dossiers in `peak_dossiers` (`[peaks].retain_hours`, default 72). They stay
+  readable after raw samples expire; `--stored` reads them, the default recomputes
+  from rollups.
+
+```json
+{"schema":"sarf.peak","v":1,"peak_count":1,
+ "peaks":[{"id":"host:a|cpu|1700000000000000000","metric":"cpu","scope":"host:a",
+           "shape":"sustained","peak":96.0,"base":8.0,"p99":9.0,"score":10.6,
+           "nodes":[{"id":"host:a","name":"nila","kind":"host","value":96.0,"share":1.0},
+                    {"id":"cgroup:1:20","name":"utazbot_tgbot","kind":"cgroup",
+                     "value":70.0,"share":0.73,"own":40.0},
+                    {"id":"proc:a:4242:1","name":"python","kind":"process","pid":4242,
+                     "value":30.0,"share":0.31}],
+           "edges":[[0,1,"on"],[1,2,"in"]],
+           "series":{"step_ns":60000000000,"from_wall_ns":1700000000000000000,"points":13},
+           "activity":{"starts":4,"exits":2,"events":9,"logs":12,"errors":3}}]}
+```
+
+What it does **not** claim: stack-level or instruction-level attribution. There is no
+eBPF/perf sampling, so the graph explains which host/cgroup/process carried the cost,
+not which function inside it did. Turning that on later is additive: a node would gain
+a `frames` array without changing the rest of the document.
 
 ## Reading the output
 
