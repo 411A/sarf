@@ -403,8 +403,12 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ]; then
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload
             if [ "$START" -eq 1 ]; then
-                systemctl enable --now sarf.service
-                note "Enabled and started sarf.service"
+                systemctl enable sarf.service
+                # `enable --now` does not restart an already-running unit, so an
+                # upgrade would keep executing the old binary. restart also starts
+                # an inactive unit, which is the desired first-install behavior.
+                systemctl restart sarf.service
+                note "Enabled and (re)started sarf.service"
             else
                 note "sarf.service is installed; --start was not given."
                 note "Enable at boot: systemctl enable sarf.service"

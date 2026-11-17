@@ -179,6 +179,10 @@ fn release_and_operations_artifacts_exist() {
         "installer must parse --docker-group"
     );
     assert!(installer.contains("--unit)"));
+    assert!(
+        installer.contains("systemctl restart sarf.service"),
+        "installer must restart an existing service after replacing the binary"
+    );
     assert!(service.contains("NoNewPrivileges=yes"));
     assert!(service.contains("ReadWritePaths="));
     assert!(!service.contains("Requires=docker"));
