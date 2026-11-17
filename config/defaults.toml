@@ -99,9 +99,10 @@ min_sustain = 1
 max_peaks = 20
 max_nodes = 16
 series_mins = 10
-# Logs, events and coincident peaks are collected this many minutes before and
-# after the episode, so an agent sees what led to the peak and what followed.
-context_mins = 5
+# The margin for logs, events and coincident peaks is derived per metric from the
+# peak's own measured pressure (PSI): 1-2 s for CPU/memory, 3-8 s for disk,
+# 10-30 s for network. This scales that derived margin, not a fixed window.
+context_scale = 1.0
 detect_mins = 30
 
 [integrations]

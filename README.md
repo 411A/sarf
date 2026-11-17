@@ -206,14 +206,19 @@ It answers "what was consuming the host, and what is related to it?":
 - **Bounded series.** `series` is a 1-minute grid (`step_ns`, `from_wall_ns`,
   `points`) and each retained node carries values aligned to it. A missing bucket is
   `null`, never `0`.
-- **Correlated evidence.** `win` is the context window actually searched
-  (`[peaks].context_mins` before and after the episode). Inside it, `logs` folds
-  distinct container/file log lines (errors first, then chronological) with their
-  source, level, repeat count and the `node` they belong to; `events` does the same for
-  lifecycle events (`process_started`, `container_started`, `incident_opened`, ...)
-  with the node index, PID and short label; `near` lists other peaks (any metric or
-  scope) that overlap the same window, so a CPU peak and an I/O or network peak at the
-  same minute are visible as one story.
+- **Correlated evidence, with a margin derived from load.** `win.h` is never a fixed
+  window: it is computed per peak from the metric's coupling class and the PSI
+  pressure measured at the peak (`win.stretch`, 0..1). CPU and memory couple
+  immediately, so their margin is **1 s idle → 2 s fully stalled**; disk queueing
+  gives **3 s → 8 s**; network is the slowest to couple, **10 s → 30 s**. A host
+  under pressure spreads causally related work over more time, so the margin grows
+  with measured stall, and `context_scale` multiplies it for very slow hosts. A CPU
+  peak can therefore never pull in evidence seconds or minutes away.
+  Inside `win`, `logs` folds distinct container/file lines (errors first, then
+  chronological) with source, level, repeat count and the `node` they belong to;
+  `events` does the same for lifecycle events with node, PID and label; `near` lists
+  other peaks (any metric or scope) overlapping the same window, so a CPU peak and an
+  I/O or network peak **at the same time** read as one story.
 - **72-hour retention.** The daemon detects peaks on its retention cadence and stores
   compact dossiers in `peak_dossiers` (`[peaks].retain_hours`, default 72). They stay
   readable after raw samples expire; `--stored` reads them, the default recomputes
@@ -230,12 +235,15 @@ It answers "what was consuming the host, and what is related to it?":
                      "value":30.0,"share":0.31}],
            "edges":[[0,1,"on"],[1,2,"in"]],
            "series":{"step_ns":60000000000,"from_wall_ns":1700000000000000000,"points":13},
-           "win":{"from_wall_ns":1700000000000000000,"to_wall_ns":1700000000000000000},
+           "win":{"from_wall_ns":1699999999990000000,"to_wall_ns":1700000000020000000,
+                  "h":1010000000,"base":1000000000,"class":"fast","stretch":0.01},
            "near":[{"metric":"net_rx","scope":"host:a","start_wall_ns":…,"end_wall_ns":…,
                     "peak":9000000.0,"score":4.2}],
            "activity":{"starts":4,"exits":2,"events":9,"logs":12,"errors":3},
-           "logs":[{"t":-42000000000,"node":1,"src":"docker:utazbot_tgbot","lvl":"error",
-                    "msg":"upstream timed out","n":3,"last_t":-120000000000}],
+           "logs":[{"t":-800000000,"node":1,"src":"docker:utazbot_tgbot","lvl":"error",
+                    "msg":"upstream timed out","n":3,"last_t":-200000000},
+                   {"t":45000000000,"node":1,"src":"docker:utazbot_tgbot","lvl":"warn",
+                    "msg":"slow request","n":1}],
            "events":[{"t":1500000000,"kind":"process_started","node":2,"pid":4242,
                       "what":"python","n":1}]}]}
 ```

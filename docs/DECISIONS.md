@@ -532,23 +532,33 @@ additive and does not change the document.
 ### Amendment - correlated evidence around the peak (schema v2)
 
 The first dossier carried only counts. An agent asked to diagnose a peak needs the
-*evidence* around it, so schema v2 adds a context window:
+*evidence* around it, so schema v2 adds a context window whose margin is **derived,
+not configured**:
 
-- `win` = `[start - context_mins, end + context_mins]` (default 5 minutes each side),
-  the window every correlated read uses.
-- `logs`: distinct lines from all sources in `win`, folded by (source, level, message)
-  with `n` and `last_t`, errors/criticals first then chronological, capped at 40.
-  `node` is the graph index when the line's entity or `docker:<container>` source maps
-  to a node, so container logs land on the container that produced them.
-- `events`: lifecycle events folded by (kind, entity, payload) with the node index,
-  PID and short label, capped at 40.
+- `win = [start - h, end + h]` where `h` comes from the metric's coupling class and
+  the PSI pressure measured at the peak: `fast` (CPU, memory, PSI, load) 1 s idle →
+  2 s fully stalled; `disk` 3 s → 8 s; `network` 10 s → 30 s. `win` exposes `h`,
+  `base`, `class` and `stretch` (0..1) so a consumer can audit the derivation. A
+  fixed `context_mins` was rejected: five minutes pulls in unrelated work, and a
+  fixed two seconds ignores that a stalled host defers work for longer.
+- `context_scale` (0.25..4.0, default 1.0) multiplies the derived margin for very
+  slow hosts; the per-class clamp still applies (a CPU margin can never exceed 8 s
+  even at scale 4, and any margin is capped at 60 s).
+- `logs`: distinct lines from all sources in `win`, folded by (source, level,
+  message) with `n` and `last_t`, errors/criticals first then chronological, capped
+  at 40. `node` is the graph index when the line's entity or `docker:<container>`
+  source maps to a node, so container logs land on the container that produced them.
+- `events`: lifecycle events folded by (kind, entity, payload) with node index, PID
+  and short label, capped at 40.
 - `near`: other peaks (any entity/metric) whose interval overlaps `win`, capped at 8,
-  so a CPU peak and a coincident I/O or network peak read as one story instead of
-  separate documents.
-- `activity` counts now cover `win` too, so the counters and the listed lines agree.
+  so a CPU peak and a coincident I/O or network peak read as one story.
+- `activity` counts cover `win`, so counters and listed lines agree.
 
-Everything stays bounded and deterministic, and missing data is still omitted rather
-than zeroed. The payload is capped at 128 KiB by the writer.
+`h` is the *margin around the episode*, not the episode itself: a one-minute peak
+still includes everything inside that minute; the margin only decides how far outside
+it something may sit and still be called correlated. Everything stays bounded and
+deterministic, and missing data is still omitted rather than zeroed. The payload is
+capped at 128 KiB by the writer.
 
 
 

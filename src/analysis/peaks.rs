@@ -43,6 +43,96 @@ const MAX_CONTEXT_LOGS: usize = 40;
 const MAX_CONTEXT_EVENTS: usize = 40;
 /// Coincident peaks listed per peak.
 const MAX_NEAR: usize = 8;
+
+/// How quickly a metric's cost can couple to another entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Coupling {
+    /// Scheduler/memory: a process burns CPU or allocates now, the effect is now.
+    Fast,
+    /// Block I/O: queueing and writeback add a few seconds of smear.
+    Disk,
+    /// Network: RTT, retransmit and queue drain are measured in tens of seconds.
+    Network,
+}
+
+impl Coupling {
+    const fn for_metric(metric: Metric) -> Self {
+        match metric {
+            Metric::Cpu
+            | Metric::Memory
+            | Metric::PsiCpu
+            | Metric::PsiMemory
+            | Metric::PsiIo
+            | Metric::Load => Self::Fast,
+            Metric::IoRead | Metric::IoWrite => Self::Disk,
+            Metric::NetRx | Metric::NetTx => Self::Network,
+        }
+    }
+
+    /// Margin at zero measured pressure.
+    const fn base_ns(self) -> i64 {
+        match self {
+            Self::Fast => 1_000_000_000,
+            Self::Disk => 3_000_000_000,
+            Self::Network => 10_000_000_000,
+        }
+    }
+
+    /// Hard cap, even on a fully stalled host.
+    const fn max_ns(self) -> i64 {
+        match self {
+            Self::Fast => 2_000_000_000,
+            Self::Disk => 8_000_000_000,
+            Self::Network => 30_000_000_000,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Disk => "disk",
+            Self::Network => "network",
+        }
+    }
+}
+
+/// Derived correlation margin for one peak.
+#[derive(Debug, Clone, Copy)]
+struct Horizon {
+    /// Applied margin, nanoseconds on each side.
+    ns: i64,
+    /// Unscaled base for the metric's coupling class.
+    base_ns: i64,
+    /// Coupling class label.
+    class: &'static str,
+    /// Measured pressure (0..1) that stretched the margin.
+    stretch: f64,
+}
+
+/// Derive the margin from the peak's own pressure, never from a fixed window.
+///
+/// `stretch` is the PSI stall percentage of the resource that governs the
+/// metric (`cpu` for scheduler/memory, `io` for disk, `cpu` for network
+/// softirq work). A stalled host defers work, so related evidence can sit
+/// further from the episode; an idle host gets the base margin. The result is
+/// clamped per class, so a CPU peak can never pull in evidence minutes away.
+fn correlation_horizon(metric: Metric, points: &[Option<&RollupPoint>], scale: f64) -> Horizon {
+    let coupling = Coupling::for_metric(metric);
+    let pressure = points.iter().flatten().find_map(|point| match coupling {
+        Coupling::Fast | Coupling::Network => point.psi_cpu_max,
+        Coupling::Disk => point.psi_io_max,
+    });
+    let stretch = pressure.map_or(0.0, |value| (value / 100.0).clamp(0.0, 1.0));
+    let base = coupling.base_ns();
+    let max = coupling.max_ns();
+    let scaled = ((max - base) as f64).mul_add(stretch, base as f64) * scale.clamp(0.25, 4.0);
+    Horizon {
+        ns: (scaled as i64).clamp(500_000_000, 60_000_000_000),
+        base_ns: base,
+        class: coupling.label(),
+        stretch,
+    }
+}
 /// Metrics with a per-entity time series.
 const METRICS: [Metric; 9] = [
     Metric::Cpu,
@@ -75,8 +165,8 @@ pub struct PeakPolicy {
     pub series_ns: i64,
     /// Look-back window used by each daemon detection pass.
     pub detect_ns: i64,
-    /// Context collected before and after each peak (logs, events, neighbours).
-    pub context_ns: i64,
+    /// Multiplier for the derived correlation margin.
+    pub context_scale: f64,
     /// How long stored dossiers are retained.
     pub retain_ns: i64,
 }
@@ -94,7 +184,7 @@ impl PeakPolicy {
             max_nodes: (peaks.max_nodes as usize).max(2),
             series_ns: (peaks.series_mins as i64).max(1) * MINUTE_NS,
             detect_ns: (peaks.detect_mins as i64).max(1) * MINUTE_NS,
-            context_ns: (peaks.context_mins as i64).max(0) * MINUTE_NS,
+            context_scale: peaks.context_scale,
             retain_ns: (peaks.retain_hours as i64).max(1) * 60 * MINUTE_NS,
         }
     }
@@ -186,6 +276,14 @@ pub struct PeakWindow {
     pub from_wall_ns: i64,
     /// End, wall clock.
     pub to_wall_ns: i64,
+    /// Correlation margin applied on each side.
+    pub h: i64,
+    /// Unscaled base margin for this metric's coupling class.
+    pub base: i64,
+    /// Coupling class: `fast`, `disk` or `network`.
+    pub class: &'static str,
+    /// Measured pressure (0..1) that stretched the margin.
+    pub stretch: f64,
 }
 
 /// Another peak close enough to be part of the same story.
@@ -624,9 +722,23 @@ fn build_dossier(
     policy: &PeakPolicy,
 ) -> Result<PeakDossier> {
     let window = Window::new(raw.start_wall_ns, raw.end_wall_ns);
+    let host_id = host.map_or_else(|| "host:unknown".to_string(), |(id, _)| id.clone());
+    let host_name = host.map_or_else(|| "host".to_string(), |(_, name)| name.clone());
+    // The margin comes from the peak's own pressure, not from a fixed window.
+    let scope_point = rollup_point_at(conn, &raw.entity_id, raw.start_wall_ns)?;
+    let host_point = if host_id == raw.entity_id {
+        None
+    } else {
+        rollup_point_at(conn, &host_id, raw.start_wall_ns)?
+    };
+    let horizon = correlation_horizon(
+        raw.metric,
+        &[scope_point.as_ref(), host_point.as_ref()],
+        policy.context_scale,
+    );
     let context = Window::new(
-        raw.start_wall_ns.saturating_sub(policy.context_ns),
-        raw.end_wall_ns.saturating_add(policy.context_ns),
+        raw.start_wall_ns.saturating_sub(horizon.ns),
+        raw.end_wall_ns.saturating_add(horizon.ns),
     );
     let series_from = raw.start_wall_ns.saturating_sub(policy.series_ns);
     let series_to = raw.end_wall_ns.saturating_add(policy.series_ns);
@@ -648,9 +760,6 @@ fn build_dossier(
             )
         })
         .collect();
-
-    let host_id = host.map_or_else(|| "host:unknown".to_string(), |(id, _)| id.clone());
-    let host_name = host.map_or_else(|| "host".to_string(), |(_, name)| name.clone());
 
     let mut nodes: Vec<PeakNode> = Vec::new();
     let mut edges: Vec<(usize, usize, EdgeKind)> = Vec::new();
@@ -827,6 +936,10 @@ fn build_dossier(
         win: PeakWindow {
             from_wall_ns: context.since,
             to_wall_ns: context.until,
+            h: horizon.ns,
+            base: horizon.base_ns,
+            class: horizon.class,
+            stretch: horizon.stretch,
         },
         near,
         activity: PeakActivity {
@@ -1003,6 +1116,21 @@ fn severity_rank(level: Option<&str>) -> u8 {
     }
 }
 
+/// One rollup row for an entity at a bucket.
+fn rollup_point_at(
+    conn: &Connection,
+    entity_id: &str,
+    bucket_wall_ns: i64,
+) -> Result<Option<RollupPoint>> {
+    Ok(query::rollup_series(
+        conn,
+        entity_id,
+        Window::new(bucket_wall_ns, bucket_wall_ns.saturating_add(MINUTE_NS)),
+    )?
+    .into_iter()
+    .next())
+}
+
 fn share(value: f64, peak: f64) -> f64 {
     if peak > 0.0 {
         (value / peak).clamp(0.0, 1.0)
@@ -1092,7 +1220,7 @@ mod tests {
             max_nodes: 16,
             series_ns: 10 * MINUTE_NS,
             detect_ns: 30 * MINUTE_NS,
-            context_ns: 5 * MINUTE_NS,
+            context_scale: 1.0,
             retain_ns: 72 * 60 * MINUTE_NS,
         }
     }
@@ -1242,7 +1370,7 @@ mod tests {
         }
         // Container logs and one lifecycle event around the peak.
         for (minute, level, message) in [
-            (69i64, "warn", "slow request"),
+            (70i64, "warn", "slow request"),
             (70, "error", "upstream timed out"),
             (71, "error", "upstream timed out"),
             (72, "error", "upstream timed out"),
@@ -1322,9 +1450,16 @@ mod tests {
         assert!(peak.nodes[cgroup].own.unwrap() <= cgroup_value);
         assert!(child_sum >= 0.0);
 
-        // Correlated evidence over the wider context window.
+        // Correlated evidence over the derived context window.
         assert!(peak.win.from_wall_ns < peak.start_wall_ns);
         assert!(peak.win.to_wall_ns > peak.end_wall_ns);
+        assert_eq!(peak.win.class, "fast");
+        assert!(
+            (1_000_000_000..=2_000_000_000).contains(&peak.win.h),
+            "a CPU peak margin stays within 1-2 s: {}",
+            peak.win.h
+        );
+        assert!(peak.win.stretch <= 0.02, "seeded psi is 1 %");
         let error = peak
             .logs
             .iter()
@@ -1354,6 +1489,61 @@ mod tests {
             .near
             .iter()
             .all(|other| !(other.metric == "cpu" && other.scope == "host:a")));
+    }
+
+    #[test]
+    fn horizon_is_metric_and_pressure_aware() {
+        let quiet = RollupPoint {
+            psi_cpu_max: Some(0.0),
+            psi_io_max: Some(0.0),
+            ..RollupPoint::default()
+        };
+        let stalled = RollupPoint {
+            psi_cpu_max: Some(100.0),
+            psi_io_max: Some(100.0),
+            ..RollupPoint::default()
+        };
+        // CPU/memory couple immediately: 1-2 s even on a fully stalled host.
+        let cpu_quiet = correlation_horizon(Metric::Cpu, &[Some(&quiet)], 1.0);
+        let cpu_stalled = correlation_horizon(Metric::Cpu, &[Some(&stalled)], 1.0);
+        assert_eq!(cpu_quiet.ns, 1_000_000_000);
+        assert_eq!(cpu_stalled.ns, 2_000_000_000);
+        // Disk queueing adds a few seconds.
+        let io = correlation_horizon(Metric::IoWrite, &[Some(&quiet)], 1.0);
+        let io_busy = correlation_horizon(Metric::IoWrite, &[Some(&stalled)], 1.0);
+        assert_eq!(io.ns, 3_000_000_000);
+        assert_eq!(io_busy.ns, 8_000_000_000);
+        // Network is the slowest to couple, capped at 30 s.
+        let net = correlation_horizon(Metric::NetRx, &[Some(&quiet)], 1.0);
+        let net_busy = correlation_horizon(Metric::NetRx, &[Some(&stalled)], 1.0);
+        assert_eq!(net.ns, 10_000_000_000);
+        assert_eq!(net_busy.ns, 30_000_000_000);
+    }
+
+    #[test]
+    fn a_cpu_horizon_never_reaches_minutes() {
+        let stalled = RollupPoint {
+            psi_cpu_max: Some(100.0),
+            ..RollupPoint::default()
+        };
+        for scale in [0.25, 1.0, 4.0] {
+            let horizon = correlation_horizon(Metric::Cpu, &[Some(&stalled)], scale);
+            assert!(
+                horizon.ns <= 8_000_000_000,
+                "scale {scale} produced {} ns",
+                horizon.ns
+            );
+        }
+        // The absolute clamp still applies to network with a large scale.
+        let net = correlation_horizon(Metric::NetTx, &[Some(&stalled)], 4.0);
+        assert!(net.ns <= 60_000_000_000);
+    }
+
+    #[test]
+    fn missing_pressure_uses_the_base_margin() {
+        let horizon = correlation_horizon(Metric::Cpu, &[None], 1.0);
+        assert_eq!(horizon.ns, horizon.base_ns);
+        assert_eq!(horizon.stretch, 0.0);
     }
 
     #[test]
