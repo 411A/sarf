@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::analysis::correlation;
+use crate::analysis::{correlation, story as story_analysis};
 use crate::cli::ByMetric;
 use crate::commands::{fmt_bytes, fmt_pct, fmt_span, fmt_time, print_json, print_table, Context};
 use crate::error::{Error, Result};
@@ -382,6 +382,171 @@ pub fn why(context: &Context, since: &str, limit: usize, metric: Option<&str>) -
     }
     println!("\nObservations and temporal associations only; SARF does not claim causation.");
     Ok(0)
+}
+
+/// Group resource windows with actors, logs, events and process links.
+pub fn story(context: &Context, since: &str, limit: usize) -> Result<i32> {
+    let store = context.open_read()?;
+    let window = context.window(since)?;
+    let document = story_analysis::build_stories(store.connection(), window, &context.config)?;
+    if context.json {
+        print_json(&document)?;
+        return Ok(0);
+    }
+    if document.groups.is_empty() {
+        println!("No correlated groups in this range.");
+        println!("This is an empty result, not zero resource usage.");
+        return Ok(0);
+    }
+    println!(
+        "INVESTIGATION STORY · {} group(s) · {} .. {}",
+        document.group_count,
+        fmt_time(document.since_wall_ns),
+        fmt_time(document.until_wall_ns)
+    );
+    for (index, group) in document.groups.iter().take(limit.max(1)).enumerate() {
+        println!(
+            "\n[{}] {} {} · {} .. {}",
+            index + 1,
+            group.kind.to_uppercase(),
+            story_analysis::metric_label(&group.metric),
+            fmt_time(group.start_wall_ns),
+            fmt_time(group.end_wall_ns)
+        );
+        println!(
+            "  observed {} · baseline {} · change {:+.1}% · confidence {:.0}% (association only)",
+            story_value(&group.metric, group.value),
+            story_value(&group.metric, group.baseline),
+            group.change_pct,
+            group.confidence * 100.0
+        );
+        println!(
+            "  host CPU avg {} · peak {} · memory peak {} · net {}",
+            fmt_pct(group.host.cpu_avg_pct),
+            fmt_pct(group.host.cpu_max_pct),
+            fmt_bytes(group.host.memory_max_bytes),
+            fmt_bytes(Some(
+                group
+                    .host
+                    .net_rx_bytes
+                    .unwrap_or(0)
+                    .saturating_add(group.host.net_tx_bytes.unwrap_or(0))
+            ))
+        );
+        let actor_rows: Vec<Vec<String>> = group
+            .actors
+            .iter()
+            .map(|actor| {
+                vec![
+                    actor.name.clone(),
+                    actor.kind.clone(),
+                    actor
+                        .tool
+                        .clone()
+                        .or_else(|| actor.container.clone())
+                        .unwrap_or_else(|| "-".to_string()),
+                    story_value(&group.metric, actor.value),
+                    actor
+                        .share_pct
+                        .map_or_else(|| "-".to_string(), |share| format!("{share:.1}%")),
+                    fmt_pct(actor.cpu_avg_pct),
+                    fmt_bytes(actor.memory_max_bytes),
+                    fmt_bytes(Some(
+                        actor
+                            .io_read_bytes
+                            .unwrap_or(0)
+                            .saturating_add(actor.io_write_bytes.unwrap_or(0)),
+                    )),
+                    fmt_bytes(Some(
+                        actor
+                            .net_rx_bytes
+                            .unwrap_or(0)
+                            .saturating_add(actor.net_tx_bytes.unwrap_or(0)),
+                    )),
+                ]
+            })
+            .collect();
+        println!("  actors:");
+        print_table(
+            &[
+                "ENTITY",
+                "KIND",
+                "TOOL/CONTAINER",
+                "VALUE",
+                "SHARE",
+                "CPU",
+                "MEM",
+                "I/O",
+                "NET",
+            ],
+            &actor_rows,
+        );
+        if !group.process_links.is_empty() {
+            println!("  process links:");
+            for link in group.process_links.iter().take(20) {
+                println!(
+                    "    {} (pid {}) -> {} (pid {}) at {}",
+                    link.parent_comm,
+                    link.parent_pid,
+                    link.child_comm,
+                    link.child_pid,
+                    fmt_time(link.child_start_wall_ns)
+                );
+            }
+        }
+        for actor in &group.actors {
+            if actor.logs.is_empty() && actor.events.is_empty() {
+                continue;
+            }
+            println!("  actor {}:", actor.name);
+            print_story_logs(&actor.logs);
+            print_story_events(&actor.events);
+        }
+        if !group.logs.is_empty() || !group.events.is_empty() {
+            println!("  unattributed:");
+            print_story_logs(&group.logs);
+            print_story_events(&group.events);
+        }
+        if !group.evidence.is_empty() {
+            println!("  evidence:");
+            for line in group.evidence.iter().take(8) {
+                println!("    - {line}");
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn story_value(metric: &str, value: f64) -> String {
+    match metric {
+        "memory" | "io_read" | "io_write" | "net_rx" | "net_tx" => {
+            fmt_bytes(Some(value.max(0.0) as u64))
+        }
+        "load" => format!("{value:.2}"),
+        _ => fmt_pct(Some(value)),
+    }
+}
+
+fn print_story_logs(logs: &[crate::model::LogRecord]) {
+    for log in logs.iter().take(8) {
+        println!(
+            "    log {} {:<16} {}",
+            fmt_time(log.wall_ns),
+            log.source_id,
+            log.message
+        );
+    }
+}
+
+fn print_story_events(events: &[crate::model::EventRecord]) {
+    for event in events.iter().take(8) {
+        println!(
+            "    event {} {:<18} {}",
+            fmt_time(event.wall_ns),
+            event.kind.as_str(),
+            event.entity_id.as_deref().unwrap_or("-")
+        );
+    }
 }
 
 /// List incidents.

@@ -108,6 +108,8 @@ overrides that for service installs.
 sarf init
 sarf run --cycles 12 --interval-secs 5     # bounded demo run
 sarf why --since 1h                        # high/low windows + contributors
+sarf story --since 1h                      # grouped actors + logs/events + process links
+sarf --json story --since 1h               # deterministic machine/AI document
 sarf top --since 1h --by cpu
 sarf processes --since 1h --filter nginx
 sarf incidents --since 24h
@@ -148,6 +150,7 @@ sarf top [--since 1h] [--by cpu|mem|net|io] [--limit N]
 sarf processes [--since 1h] [--filter TEXT]
 sarf tree [--since 1h] [--process ID] [--service NAME]
 sarf why [--since 1h] [--metric cpu|memory|psi_cpu|psi_memory|psi_io|load]
+sarf story [--since 1h] [--limit N]          # grouped investigation; add --json for AI
 sarf incidents [--since 24h]
 sarf show <incident-id>
 sarf logs <source|all> [--since 1h] [--grep TEXT] [--level warn]

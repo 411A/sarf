@@ -105,6 +105,15 @@ pub enum Command {
         #[arg(long)]
         metric: Option<String>,
     },
+    /// Group resource windows with actors, logs, events and process links.
+    Story {
+        /// Window.
+        #[arg(long, default_value = "1h")]
+        since: String,
+        /// Maximum groups.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// List incidents in a window.
     Incidents {
         /// Window.

@@ -50,6 +50,7 @@ fn every_documented_command_parses() {
         &["sarf", "processes", "--since", "1h", "--filter", "nginx"],
         &["sarf", "tree", "--since", "1h", "--limit", "20"],
         &["sarf", "why", "--since", "1h", "--metric", "cpu"],
+        &["sarf", "story", "--since", "1h", "--limit", "5"],
         &["sarf", "incidents", "--since", "24h"],
         &["sarf", "show", "1"],
         &[

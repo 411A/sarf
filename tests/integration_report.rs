@@ -411,6 +411,49 @@ fn report_detects_high_cpu_and_names_contributors_with_evidence() {
 }
 
 #[test]
+fn story_groups_actors_and_related_evidence_deterministically() {
+    let mut seeded = seed();
+    let _ = prepare_report(&mut seeded);
+    let config = Config::default();
+    let document = sarf::analysis::story::build_stories(
+        seeded.store.connection(),
+        Window::new(seeded.start, seeded.until),
+        &config,
+    )
+    .expect("stories");
+    assert!(!document.groups.is_empty(), "expected a correlated group");
+    let group = document
+        .groups
+        .iter()
+        .find(|group| group.metric == "cpu" && group.kind == "high")
+        .expect("high CPU group");
+    assert!(group
+        .actors
+        .iter()
+        .any(|actor| actor.name.contains("nginx")));
+    let has_log = group
+        .actors
+        .iter()
+        .flat_map(|actor| &actor.logs)
+        .chain(group.logs.iter())
+        .any(|log| log.message.contains("timed out"));
+    assert!(has_log, "related logs should be grouped with the window");
+    let json = serde_json::to_string(&document).expect("json");
+    assert!(json.contains("\"schema_version\":1"));
+    let again = serde_json::to_string(
+        &sarf::analysis::story::build_stories(
+            seeded.store.connection(),
+            Window::new(seeded.start, seeded.until),
+            &config,
+        )
+        .expect("stories again"),
+    )
+    .expect("json again");
+    assert_eq!(json, again, "story JSON must be deterministic");
+    let _ = std::fs::remove_dir_all(&seeded.root);
+}
+
+#[test]
 fn report_html_has_required_views_and_no_network_references() {
     let mut seeded = seed();
     let document = prepare_report(&mut seeded);

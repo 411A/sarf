@@ -295,6 +295,7 @@ pub fn main() -> Result<i32> {
             limit,
             metric,
         } => query::why(&context, since, *limit, metric.as_deref()),
+        Command::Story { since, limit } => query::story(&context, since, *limit),
         Command::Incidents { since, limit } => query::incidents(&context, since, *limit),
         Command::Show { incident_id } => query::show(&context, *incident_id),
         Command::Logs {
