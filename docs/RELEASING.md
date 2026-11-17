@@ -4,6 +4,11 @@ The release pipeline produces **static musl binaries** and attaches them to a
 GitHub Release. Operators download one file and run `sarf install`; no repository
 checkout, build toolchain or separate installer script is needed.
 
+CI and the release workflow pin Rust `1.100.0` so a new stable Clippy release
+cannot turn an unrelated push red. Bump that version deliberately, run the full
+verification, and keep `rust-version` in `Cargo.toml` as the source-compatibility
+floor.
+
 ## Cutting a release
 
 1. Update `version` in `Cargo.toml` and commit it.

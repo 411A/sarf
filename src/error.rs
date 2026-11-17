@@ -1,8 +1,7 @@
 //! Typed errors for the pieces of SARF that are reused and unit-tested.
 //!
-//! Command implementations mostly use [`anyhow::Error`]; parsers and the storage
-//! layer expose the typed [`Error`] so tests can assert on the failure kind instead
-//! of on message text.
+//! Parsers, storage and command implementations expose the typed [`Error`] so tests
+//! can assert on the failure kind instead of on message text.
 
 use std::path::PathBuf;
 
