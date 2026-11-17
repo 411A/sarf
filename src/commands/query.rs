@@ -31,8 +31,10 @@ pub fn top(context: &Context, since: &str, by: ByMetric, limit: usize) -> Result
             .partial_cmp(&value_for(left, by))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    usage.truncate(limit.max(1));
+    // Compute the share denominator before applying the display limit. Otherwise
+    // "SHARE" describes only the visible top rows and always sums to 100%.
     let total: f64 = usage.iter().map(|row| value_for(row, by)).sum();
+    usage.truncate(limit.max(1));
     let rows: Vec<TopRow> = usage
         .into_iter()
         .map(|row| TopRow {
@@ -385,8 +387,9 @@ pub fn why(context: &Context, since: &str, limit: usize, metric: Option<&str>) -
 /// List incidents.
 pub fn incidents(context: &Context, since: &str, limit: usize) -> Result<i32> {
     let store = context.open_read()?;
+    let conn = store.connection();
     let window = context.window(since)?;
-    let rows = query::incidents(store.connection(), window, limit.max(1))?;
+    let rows = query::incidents(conn, window, limit.max(1))?;
     if context.json {
         print_json(&rows)?;
         return Ok(0);
@@ -400,10 +403,10 @@ pub fn incidents(context: &Context, since: &str, limit: usize) -> Result<i32> {
                 incident
                     .ended_wall_ns
                     .map_or_else(|| "open".to_string(), fmt_time),
-                incident
-                    .entity_id
-                    .clone()
-                    .unwrap_or_else(|| "host".to_string()),
+                incident.entity_id.as_deref().map_or_else(
+                    || "host".to_string(),
+                    |id| query::entity_display_name(conn, id),
+                ),
                 incident.metric.as_str().to_string(),
                 format!("{:.2}", incident.peak),
                 format!("{:.2}", incident.baseline),
@@ -474,7 +477,10 @@ pub fn show(context: &Context, incident_id: i64) -> Result<i32> {
         incident.evidence_loss
     );
     if let Some(entity) = &incident.entity_id {
-        println!("  entity {entity}");
+        println!(
+            "  entity {} ({entity})",
+            query::entity_display_name(conn, entity)
+        );
     }
     if !incident.evidence.is_null() {
         if let Ok(text) = serde_json::to_string_pretty(&incident.evidence) {

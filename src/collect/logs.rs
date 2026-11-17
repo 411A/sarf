@@ -1228,7 +1228,7 @@ mod tests {
         ];
         let pulse = manager.ingest_external(&source, lines, &stamps(1_700_000_010_000_000_000));
         assert_eq!(pulse.received, 3);
-        assert!(!pulse.records.is_empty());
+        assert_ne!(pulse.records.len(), 0);
         assert!(pulse.records.iter().any(|record| {
             record.entity_id.as_deref() == Some("container:abcdef012345")
                 && record.level == Some(Severity::Error)
@@ -1269,7 +1269,7 @@ mod tests {
             }],
             &stamps(1),
         );
-        assert!(first.errors.is_empty());
+        assert_eq!(first.errors.len(), 0);
         let second = manager.ingest_external(
             &make("docker:two"),
             vec![ExternalLogLine {
@@ -1280,7 +1280,7 @@ mod tests {
             }],
             &stamps(2),
         );
-        assert!(second.errors.is_empty());
+        assert_eq!(second.errors.len(), 0);
         assert_eq!(manager.source_count(), 1);
         assert!(manager.source_exists("docker:two"));
         assert!(!manager.source_exists("docker:one"));

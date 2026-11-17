@@ -194,12 +194,12 @@ fn docker_and_session_parsers_handle_real_output_shapes() {
     // Docker being absent is a normal, non-fatal state.
     let absent = docker::DockerDiscovery::default();
     assert!(!absent.available);
-    assert!(absent.containers.is_empty());
+    assert_eq!(absent.containers.len(), 0);
 
     let panes = sessions::parse_tmux_panes("$0\tmain\t@1\teditor\t%2\t4242\tvim\n");
     assert_eq!(panes.len(), 1);
     assert_eq!(panes[0].label(), "tmux main:editor/%2");
-    assert!(sessions::parse_tmux_panes("garbage\n").is_empty());
+    assert_eq!(sessions::parse_tmux_panes("garbage\n").len(), 0);
 }
 
 #[test]

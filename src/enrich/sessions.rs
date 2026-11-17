@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn malformed_tmux_rows_are_skipped() {
         let output = "\n$0\tmain\n$0\tmain\t@1\teditor\t%2\tnotapid\tbash\n";
-        assert!(parse_tmux_panes(output).is_empty());
+        assert_eq!(parse_tmux_panes(output).len(), 0);
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
             sessions: vec!["work".to_string()],
             error: None,
         };
-        assert!(discovery.panes.is_empty());
+        assert_eq!(discovery.panes.len(), 0);
         assert_eq!(discovery.sessions, vec!["work".to_string()]);
     }
 }

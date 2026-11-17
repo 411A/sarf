@@ -188,10 +188,10 @@ impl DockerApi {
         let filter = url_encode(r#"{"type":["container"]}"#);
         let mut path = format!("{}/events?filters={filter}", self.prefix);
         if let Some(since) = since_ns.filter(|value| *value > 0) {
-            // Docker's events endpoint expects Unix seconds for this parameter; using
+            // Docker's events/logs endpoints expect Unix seconds for this parameter;
             // RFC3339 with a fractional part is rejected by some daemon versions.
             path.push_str("&since=");
-            path.push_str(&(since / 1_000_000_000).saturating_sub(1).to_string());
+            path.push_str(&since_seconds(since).to_string());
         }
         path.push_str("&until=");
         path.push_str(&(until_ns / 1_000_000_000).saturating_add(1).to_string());
@@ -220,8 +220,11 @@ impl DockerApi {
             self.prefix
         );
         if let Some(since) = since_ns.filter(|value| *value > 0) {
+            // Use integer Unix seconds. The daemon rejects RFC3339 values with a
+            // fractional part here; the caller filters returned lines back to the
+            // original nanosecond cursor, so the one-second overlap is harmless.
             path.push_str("&since=");
-            path.push_str(&url_encode(&format_wall_rfc3339(since)));
+            path.push_str(&since_seconds(since).to_string());
         }
         let response = self.get(&path, max_bytes)?;
         Ok(parse_logs(&response.body, tty, response.truncated))
@@ -666,6 +669,14 @@ fn parse_events(body: &[u8]) -> Vec<DockerEvent> {
     events
 }
 
+/// Docker `since` parameter in integer Unix seconds.
+///
+/// Subtract one second so a cursor just after a second boundary cannot skip a
+/// record. Callers filter returned records against the original nanosecond cursor.
+const fn since_seconds(since_ns: i64) -> i64 {
+    (since_ns / 1_000_000_000).saturating_sub(1)
+}
+
 fn parse_logs(body: &[u8], tty: bool, mut truncated: bool) -> DockerLogBatch {
     let mut records: Vec<(LogStream, Vec<u8>)> = Vec::new();
     if tty {
@@ -1064,6 +1075,13 @@ mod tests {
         let encoded = url_encode(r#"{"type":["container"]}"#);
         assert_eq!(encoded, "%7B%22type%22%3A%5B%22container%22%5D%7D");
         assert!(!encoded.contains('{'));
+    }
+
+    #[test]
+    fn docker_since_uses_integer_seconds() {
+        assert_eq!(since_seconds(1_700_000_000_123_456_789), 1_699_999_999);
+        assert_eq!(since_seconds(1_700_000_000_999_999_999), 1_699_999_999);
+        assert_eq!(since_seconds(1_000_000_001), 0);
     }
 
     #[test]

@@ -251,9 +251,7 @@ impl AnalysisState {
                     self.previous_cgroups.get(&sample.entity_id).copied()
                 {
                     let elapsed = sample.stamps.mono.saturating_sub(previous_wall);
-                    if elapsed > 0 && usage >= previous_usage {
-                        let delta = usage - previous_usage;
-                        let pct = delta as f64 * 100.0 / (elapsed as f64 / 1_000_000.0);
+                    if let Some(pct) = cgroup_cpu_pct(usage, previous_usage, elapsed) {
                         if let Some(signal) = self.signal(
                             Some(sample.entity_id.clone()),
                             Metric::Cpu,
@@ -299,6 +297,19 @@ fn host_cpu_pct(previous: &HostSample, current: &HostSample, cpu_count: usize) -
     }
     let busy = delta.user + delta.nice + delta.system + delta.irq + delta.softirq + delta.steal;
     Some(busy as f64 * 100.0 * cpu_count.max(1) as f64 / total as f64)
+}
+
+/// CPU percent of one core from cumulative cgroup `usage_usec` counters.
+///
+/// `elapsed_ns` is the monotonic time between the two samples. Converting the
+/// denominator to microseconds (`elapsed_ns / 1_000`) is essential: using
+/// milliseconds makes every cgroup percentage 1000x too large.
+fn cgroup_cpu_pct(usage_usec: u64, previous_usec: u64, elapsed_ns: i64) -> Option<f64> {
+    if elapsed_ns <= 0 || usage_usec < previous_usec {
+        return None;
+    }
+    let delta = usage_usec - previous_usec;
+    Some(delta as f64 * 100.0 * 1_000.0 / elapsed_ns as f64)
 }
 
 /// Run the daemon.
@@ -1717,6 +1728,15 @@ mod tests {
         assert!(!due(&mut last, 2_000_000_000, 5));
         assert!(due(&mut last, 6_000_000_000, 5));
         assert!(due(&mut last, 7_000_000_000, 1));
+    }
+
+    #[test]
+    fn cgroup_cpu_is_percent_of_one_core() {
+        // 5,000 usec of CPU over 10 ms is 50% of one core.
+        let pct = cgroup_cpu_pct(5_000, 0, 10_000_000).expect("pct");
+        assert!((pct - 50.0).abs() < 0.001, "pct {pct}");
+        assert!(cgroup_cpu_pct(0, 10, 10_000_000).is_none());
+        assert!(cgroup_cpu_pct(1, 0, 0).is_none());
     }
 
     #[test]

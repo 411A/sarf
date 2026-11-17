@@ -734,8 +734,8 @@ mod tests {
         }
         assert_eq!(engine.open_count(), 0);
         let pulse = engine.take_pulse();
-        assert!(pulse.opened.is_empty());
-        assert!(pulse.events.is_empty());
+        assert_eq!(pulse.opened.len(), 0);
+        assert_eq!(pulse.events.len(), 0);
     }
 
     #[test]

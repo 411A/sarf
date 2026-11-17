@@ -1316,7 +1316,7 @@ mod tests {
         assert!(low.change_pct < -50.0, "change {}", low.change_pct);
         assert!(low.value <= 5.0, "value {}", low.value);
         assert!(low.baseline > 35.0);
-        assert!(!low.contributors.is_empty());
+        assert_ne!(low.contributors.len(), 0);
         assert_eq!(low.contributors[0].name, "worker-1", "low ranks ascending");
         assert!(low
             .evidence

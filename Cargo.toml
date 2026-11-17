@@ -1,6 +1,6 @@
 [package]
 name = "sarf"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 description = "SARF — lightweight Linux process, service and activity forensics"
@@ -68,9 +68,6 @@ struct_excessive_bools = "allow"
 must_use_candidate = "allow"
 # Log/text parsing matches on many short ASCII bytes; byte indexing is intentional.
 items_after_statements = "allow"
-# Test assertions read better as `assert!(!items.is_empty())` than as the typed
-# `assert_ne!(items, [] as [T; 0])` rewrite suggested by this stylistic lint.
-assert_is_empty = "allow"
 
 [profile.release]
 opt-level = 3

@@ -165,7 +165,7 @@ fn unavailable_is_not_zero() {
     assert!(document.summary.host_cpu_avg_pct.is_none());
     assert!(document.summary.host_cpu_max_pct.is_none());
     assert!(document.summary.host_mem_used_max_bytes.is_none());
-    assert!(document.series.timestamps.is_empty());
+    assert_eq!(document.series.timestamps.len(), 0);
     let _ = std::fs::remove_dir_all(root);
 }
 

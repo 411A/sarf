@@ -332,7 +332,7 @@ mod tests {
         let clock = format_wall_clock(1_767_225_600_000_000_000);
         assert_eq!(clock.len(), 8, "expected HH:MM:SS, got {clock}");
         assert_eq!(clock.matches(':').count(), 2);
-        assert!(!format_wall_local(1_767_225_600_000_000_000).is_empty());
+        assert_ne!(format_wall_local(1_767_225_600_000_000_000), "");
     }
 
     #[test]

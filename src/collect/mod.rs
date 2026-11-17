@@ -407,7 +407,7 @@ mod tests {
     fn host_facts_have_a_stable_fallback_boot_id() {
         let root = SourceRoot::fixture("/nonexistent-sarf-fixture");
         let facts = HostFacts::read(&root);
-        assert!(!facts.boot_id.is_empty());
+        assert_ne!(facts.boot_id, "");
         assert_eq!(facts.boot_id, HostFacts::read(&root).boot_id);
     }
 

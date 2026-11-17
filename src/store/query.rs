@@ -1623,7 +1623,9 @@ fn merge_entity(
     }
 }
 
-fn entity_display_name(conn: &Connection, entity_id: &str) -> String {
+/// Resolve an entity id to a human-readable name, falling back to process metadata
+/// and finally to the raw id.
+pub fn entity_display_name(conn: &Connection, entity_id: &str) -> String {
     if let Some(name) = conn
         .query_row(
             "SELECT name FROM entities WHERE entity_id = ?1",
@@ -2290,7 +2292,7 @@ mod tests {
             limit: 10,
             ..Default::default()
         };
-        assert!(logs(store.connection(), &filter).expect("logs").is_empty());
+        assert_eq!(logs(store.connection(), &filter).expect("logs").len(), 0);
     }
 
     #[test]

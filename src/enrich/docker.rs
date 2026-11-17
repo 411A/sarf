@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn skips_malformed_and_non_container_lines() {
         let output = "not json\n{\"ID\":\"short\"}\n{\"ID\":\"zzzzzzzzzzzz\"}\n";
-        assert!(parse_ps_output(output).is_empty());
+        assert_eq!(parse_ps_output(output).len(), 0);
     }
 
     #[test]

@@ -1174,7 +1174,7 @@ mod tests {
         let options = ReportOptions::window(Window::new(now - 3_600_000_000_000, now));
         let document = build(store.connection(), &config, &options).expect("report");
         assert_eq!(document.summary.log_count, 0);
-        assert!(document.series.timestamps.is_empty());
+        assert_eq!(document.series.timestamps.len(), 0);
         assert!(document.windows.is_empty());
         let html = render_html(&document).expect("html");
         assert!(html.contains("<html"));
