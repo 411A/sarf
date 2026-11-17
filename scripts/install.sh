@@ -13,6 +13,10 @@
 #   --prefix PATH     Install prefix (default: /usr/local)
 #   --data-dir PATH   Data/config directory (default: /var/lib/sarf)
 #   --user NAME       Service user and group (default: sarf)
+#   --full-observation
+#                     Run the service as root with PrivateTmp=no for full
+#                     /proc, Docker and tmux visibility (root + read-only mount
+#                     hardening; see the warning below)
 #   --unit PATH       systemd unit template (default: <repo>/deploy/sarf.service)
 #   --no-systemd      Do not install or reload the systemd unit
 #   --start           Enable and start the unit now (requires systemd)
@@ -48,6 +52,8 @@ UNIT_SRC="$REPO_ROOT/deploy/sarf.service"
 INSTALL_SYSTEMD=1
 START=0
 JOIN_DOCKER_GROUP=0
+FULL_OBSERVATION=0
+PRIVATE_TMP=1
 
 usage() {
     cat <<'EOF'
@@ -60,6 +66,10 @@ Options:
   --prefix PATH     Install prefix (default: /usr/local)
   --data-dir PATH   Data/config directory (default: /var/lib/sarf)
   --user NAME       Service user and group (default: sarf)
+  --full-observation
+                    Run as root with PrivateTmp=no for full /proc, Docker and
+                    tmux visibility. The system mount namespace remains read-only
+                    except the data directory. This is root-equivalent by design.
   --unit PATH       systemd unit template (default: <repo>/deploy/sarf.service)
   --no-systemd      Do not install or reload the systemd unit
   --start           Enable and start the unit now (requires systemd)
@@ -119,6 +129,13 @@ while [ "$#" -gt 0 ]; do
             RUN_GROUP=$RUN_USER
             shift
             ;;
+        --full-observation)
+            FULL_OBSERVATION=1
+            RUN_USER=root
+            RUN_GROUP=root
+            PRIVATE_TMP=0
+            shift
+            ;;
         --unit)
             [ "$#" -ge 2 ] || die "--unit needs a path"
             UNIT_SRC=$2
@@ -160,6 +177,17 @@ done
 [ -n "$PREFIX" ] || die "--prefix must not be empty"
 [ -n "$DATA_DIR" ] || die "--data-dir must not be empty"
 [ -n "$RUN_USER" ] || die "--user must not be empty"
+
+# Full observation is root-only because it needs cross-user /proc and tmux socket
+# access. The systemd mount namespace still permits writes only to DATA_DIR.
+if [ "$RUN_USER" = root ]; then
+    PRIVATE_TMP=0
+else
+    PRIVATE_TMP=1
+fi
+if [ "$FULL_OBSERVATION" -eq 1 ] && [ "$RUN_USER" != root ]; then
+    die "--full-observation requires the root service user"
+fi
 
 # Account names are interpolated into commands and the unit's User=/Group=.
 case "$RUN_USER" in
@@ -397,8 +425,23 @@ if [ "$INSTALL_SYSTEMD" -eq 1 ]; then
             fi
         fi
 
+        if [ "$PRIVATE_TMP" -eq 0 ]; then
+            # tmux sockets live in the host /tmp and are per-user. Root with a
+            # private /tmp cannot see another user's tmux server. The service is
+            # still read-only everywhere except DATA_DIR via ProtectSystem=strict.
+            if grep -q '^PrivateTmp=' "$UNIT_DEST"; then
+                sed -i 's/^PrivateTmp=.*/PrivateTmp=no/' "$UNIT_DEST"
+            else
+                printf '\nPrivateTmp=no\n' >> "$UNIT_DEST"
+            fi
+        fi
+
         UNIT_INSTALLED=1
         note "Installed systemd unit: $UNIT_DEST"
+        if [ "$FULL_OBSERVATION" -eq 1 ]; then
+            note "WARNING: full-observation mode runs as root with a shared /tmp."
+            note "The mount namespace is read-only except $DATA_DIR; review the unit before relying on it."
+        fi
 
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload

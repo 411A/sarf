@@ -198,6 +198,9 @@ pub struct InstallArgs {
     /// Add the service user to the docker group (root-equivalent).
     #[arg(long)]
     pub docker_group: bool,
+    /// Run as root with PrivateTmp=no for full /proc, Docker and tmux visibility.
+    #[arg(long)]
+    pub full_observation: bool,
     /// Enable and start the systemd unit after installing it.
     #[arg(long)]
     pub start: bool,

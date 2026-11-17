@@ -132,6 +132,9 @@ fn installer_arguments(
     if args.docker_group {
         argv.push(std::ffi::OsString::from("--docker-group"));
     }
+    if args.full_observation {
+        argv.push(std::ffi::OsString::from("--full-observation"));
+    }
     if args.start {
         argv.push(std::ffi::OsString::from("--start"));
     }
@@ -150,6 +153,7 @@ mod tests {
             prefix: PathBuf::from("/opt/sarf"),
             user: "sarf".to_string(),
             docker_group,
+            full_observation: false,
             start,
             no_systemd,
         }
@@ -184,6 +188,21 @@ mod tests {
                 "missing {flag} {value}: {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn installer_arguments_can_request_full_observation() {
+        let mut args = args(false, false, false);
+        args.full_observation = true;
+        let argv = installer_arguments(
+            Path::new("/tmp/sarf"),
+            Path::new("/srv/sarf"),
+            Path::new("/tmp/unit.service"),
+            &args,
+        );
+        assert!(argv
+            .iter()
+            .any(|value| value.to_string_lossy() == "--full-observation"));
     }
 
     #[test]

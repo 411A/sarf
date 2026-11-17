@@ -333,3 +333,32 @@ depends on a GitHub-hosted ARM runner.
 **Upgrade path.** Add signed artifacts (`cosign`/minisign) and `.deb`/RPM packaging if
 operators need repository-managed updates; keep the self-install path as the
 zero-dependency fallback.
+
+## ADR-020 — Opt-in full-observation mode runs as root
+
+**Context.** The default `sarf` service user is isolated and cannot read every
+`/proc/<pid>` entry or another user's tmux server. tmux sockets are per-user under
+`/tmp/tmux-<uid>`, and the unit's `PrivateTmp=yes` hides the host `/tmp` entirely.
+Operators who need complete observation asked for a root/current-user mode without
+turning SARF into a writable system agent.
+
+**Decision.** Add `sarf install --full-observation`. It sets the service user/group to
+`root`, sets `PrivateTmp=no` so host tmux sockets are visible, and keeps the generated
+unit's existing read-only hardening:
+
+- `ProtectSystem=strict`
+- `ReadWritePaths=<data-dir>` only
+- `ProtectHome=read-only`
+- `ProtectKernelTunables=yes`, `ProtectControlGroups=yes`
+- `NoNewPrivileges=yes`, `RestrictSUIDSGID`, `LockPersonality`, `MemoryDenyWriteExecute`
+
+The default remains the isolated `sarf` user. `--full-observation` is explicit because
+it is root-equivalent and weakens the `/tmp` isolation boundary.
+
+**Consequences.** Root mode sees all process and tmux data, and Docker socket access
+no longer needs the docker group. It also means a compromised SARF process runs as
+root, mitigated but not eliminated by the read-only mount namespace. The data
+directory is chowned to root; existing history is preserved.
+
+**Upgrade path.** A future read-only helper or narrowly scoped capabilities can
+replace full root if the required observation set is proven sufficient.

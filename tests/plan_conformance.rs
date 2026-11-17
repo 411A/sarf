@@ -188,6 +188,8 @@ fn release_and_operations_artifacts_exist() {
         "installer must parse --docker-group"
     );
     assert!(installer.contains("--unit)"));
+    assert!(installer.contains("--full-observation)"));
+    assert!(installer.contains("PrivateTmp=no"));
     assert!(
         installer.contains("systemctl restart sarf.service"),
         "installer must restart an existing service after replacing the binary"

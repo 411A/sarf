@@ -61,6 +61,12 @@ configuration and the hardened systemd unit, and enables/starts the service.
 - Omit `--start` to install the unit without starting it.
 - Use `--prefix PATH`, `--user NAME`, `--data-dir PATH` or `--no-systemd` for
   non-default layouts. Run `sarf install --help` for the full list.
+- For **full observation**, use `--full-observation`. The service runs as root
+  with `PrivateTmp=no`, so it can read other users' `/proc` entries and tmux
+  sockets. The generated unit still has `ProtectSystem=strict`, read-only home
+  and kernel/control-group protections, and permits writes only below the data
+  directory. This is root-equivalent and opt-in; the default `sarf` service user
+  sees only its own tmux sessions.
 
 The service stores history in `/var/lib/sarf`. Pass
 `--data-dir /var/lib/sarf` to every read command (`doctor`, `status`, `top`,

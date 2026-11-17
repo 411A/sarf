@@ -20,6 +20,9 @@ ExecStart=/usr/local/bin/sarf run --data-dir /var/lib/sarf --config /var/lib/sar
 
 # Unprivileged by design. If hidepid, Yama or log permissions hide data, SARF
 # records a coverage gap / unavailable status; it never substitutes zero.
+# Deployments that need cross-user /proc and tmux visibility can install with
+# `sarf install --full-observation`: it generates User=root and PrivateTmp=no
+# while keeping ProtectSystem=strict and ReadWritePaths limited to the data dir.
 User=sarf
 Group=sarf
 WorkingDirectory=/var/lib/sarf
