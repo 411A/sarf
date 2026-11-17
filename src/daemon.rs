@@ -442,6 +442,9 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
     for (id, _, _, _, _, _) in logs.descriptors() {
         health.register(&format!("logs:{id}"), ConfiguredState::Auto);
     }
+    if options.config.peaks.enabled {
+        health.register("peaks", ConfiguredState::Auto);
+    }
     let mut analysis = AnalysisState::new();
     let catalog = Catalog::embedded()?;
     let mut process_collector = ProcessCollector::new(
@@ -1799,11 +1802,24 @@ fn prune(
                         Err(err) => health.error("peaks", now_wall_ns, &err.to_string()),
                     }
                 }
-                if let Err(err) = store.write(&items) {
-                    health.error("peaks", now_wall_ns, &err.to_string());
+                match store.write(&items) {
+                    Ok(written) => {
+                        health.success("peaks", now_wall_ns);
+                        health.received("peaks", written as u64);
+                        health.persisted("peaks", written as u64);
+                        health.coverage(
+                            "peaks",
+                            json!({
+                                "detected": dossiers.len(),
+                                "window_ns": peaks.detect_ns,
+                                "retain_hours": options.config.peaks.retain_hours,
+                            }),
+                        );
+                    }
+                    Err(err) => health.error("peaks", now_wall_ns, &err.to_string()),
                 }
             }
-            Ok(_) => {}
+            Ok(_) => health.success("peaks", now_wall_ns),
             Err(err) => health.error("peaks", now_wall_ns, &err.to_string()),
         }
     }

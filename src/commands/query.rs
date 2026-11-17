@@ -917,10 +917,13 @@ pub fn peaks(
             10_000,
         )?)
     } else if policy.enabled {
-        serde_json::to_string(&peaks_analysis::document(
+        // One document, everything at once: fresh detection merged with the
+        // dossiers the daemon stored, deduplicated by id.
+        serde_json::to_string(&peaks_analysis::merged_document(
             store.connection(),
             window,
             &policy,
+            10_000,
         )?)
     } else {
         // Disabled is not "no peaks": say so explicitly instead of emitting [].

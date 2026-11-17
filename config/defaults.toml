@@ -96,8 +96,11 @@ baseline_mins = 60
 mad_k = 3.0
 # Consecutive 1-minute buckets required to report a peak.
 min_sustain = 1
-max_peaks = 20
-max_nodes = 16
+# A peak must also be this far above the rolling p99; below it the level is
+# statistically indistinguishable from recent history and is dropped as noise.
+min_score = 1.02
+max_peaks = 10
+max_nodes = 8
 series_mins = 10
 # The margin for logs, events and coincident peaks is derived per metric from the
 # peak's own measured pressure (PSI): 1-2 s for CPU/memory, 3-8 s for disk,

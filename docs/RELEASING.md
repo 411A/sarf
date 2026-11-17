@@ -15,8 +15,8 @@ floor.
 2. Create and push a matching tag:
 
    ```bash
-   git tag v0.1.13
-   git push origin v0.1.13
+   git tag v0.1.14
+   git push origin v0.1.14
    ```
 
 3. `.github/workflows/release.yml` checks that the tag matches `Cargo.toml`, then

@@ -16,7 +16,7 @@
 //! are `on` (runs on that host/cgroup) and `in` (process is contained in that
 //! cgroup). `own` is only computed where containment makes it meaningful.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -30,19 +30,38 @@ use crate::store::PeakDossierRow;
 /// Stable document schema name for machine consumers.
 pub const PEAK_SCHEMA: &str = "sarf.peak";
 /// Version of the peak document.
-pub const PEAK_SCHEMA_VERSION: u32 = 2;
+pub const PEAK_SCHEMA_VERSION: u32 = 3;
 /// One bucket of the detection series.
 const MINUTE_NS: i64 = 60_000_000_000;
 /// Minimum baseline points before a peak can be claimed.
 const MIN_HISTORY: usize = 5;
 /// Rows read before folding; folding then caps what is retained.
 const MAX_CONTEXT_READ: usize = 2_000;
-/// Distinct log lines retained per peak.
-const MAX_CONTEXT_LOGS: usize = 40;
+/// Distinct log lines retained per peak (warnings/errors only).
+const MAX_CONTEXT_LOGS: usize = 8;
+/// Info/unknown lines kept only when no warning or error exists.
+const MAX_FALLBACK_LOGS: usize = 4;
 /// Distinct events retained per peak.
-const MAX_CONTEXT_EVENTS: usize = 40;
+const MAX_CONTEXT_EVENTS: usize = 10;
 /// Coincident peaks listed per peak.
-const MAX_NEAR: usize = 8;
+const MAX_NEAR: usize = 4;
+/// Series points kept for the scope node.
+const MAX_SERIES_POINTS: usize = 12;
+/// Event kinds that can explain a resource peak.
+const VITAL_EVENTS: [&str; 12] = [
+    "process_started",
+    "process_exited",
+    "container_started",
+    "container_stopped",
+    "container_warning",
+    "service_event",
+    "incident_opened",
+    "incident_closed",
+    "log_flood",
+    "collect_gap",
+    "integration_degraded",
+    "threshold_crossed",
+];
 
 /// How quickly a metric's cost can couple to another entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +178,8 @@ pub struct PeakPolicy {
     pub min_sustain: usize,
     /// Maximum peaks per document and per stored pass.
     pub max_peaks: usize,
+    /// Minimum score; lower candidates are noise around the p99.
+    pub min_score: f64,
     /// Maximum graph nodes per peak (host included).
     pub max_nodes: usize,
     /// History kept before and after a peak in the series.
@@ -181,6 +202,7 @@ impl PeakPolicy {
             mad_k: peaks.mad_k.max(0.0),
             min_sustain: (peaks.min_sustain as usize).max(1),
             max_peaks: (peaks.max_peaks as usize).max(1),
+            min_score: peaks.min_score.max(1.0),
             max_nodes: (peaks.max_nodes as usize).max(2),
             series_ns: (peaks.series_mins as i64).max(1) * MINUTE_NS,
             detect_ns: (peaks.detect_mins as i64).max(1) * MINUTE_NS,
@@ -227,6 +249,8 @@ pub struct StoredPeakDocument {
 /// One detected peak with its cascade graph.
 #[derive(Debug, Clone, Serialize)]
 pub struct PeakDossier {
+    /// Payload schema version, so stored rows are self-identifying.
+    pub v: u32,
     /// Stable id (`scope|metric|start`).
     pub id: String,
     /// Metric name.
@@ -567,7 +591,7 @@ fn detect_series(
     if let Some(run) = current.take() {
         peaks.push(run);
     }
-    peaks.retain(|peak| peak.buckets >= policy.min_sustain);
+    peaks.retain(|peak| peak.buckets >= policy.min_sustain && score(peak) >= policy.min_score);
     peaks
 }
 
@@ -624,20 +648,6 @@ fn metric_value(point: &RollupPoint, metric: Metric) -> Option<f64> {
         Metric::PsiIo => point.psi_io_max,
         Metric::Load => None,
     }
-}
-
-/// Whether a metric is measured per entity (`false` for PSI, which is only
-/// available for hosts and cgroups).
-const fn per_process(metric: Metric) -> bool {
-    matches!(
-        metric,
-        Metric::Cpu
-            | Metric::Memory
-            | Metric::IoRead
-            | Metric::IoWrite
-            | Metric::NetRx
-            | Metric::NetTx
-    )
 }
 
 /// Build every dossier for `window`.
@@ -698,6 +708,69 @@ pub fn stored_document(
     })
 }
 
+/// One document with every peak in the window, all at once.
+///
+/// Freshly detected peaks come first; dossiers the daemon already stored are
+/// added when they are not in the fresh set. Only payloads of the current
+/// schema are merged, so an upgraded binary never mixes shapes.
+pub fn merged_document(
+    conn: &Connection,
+    window: Window,
+    policy: &PeakPolicy,
+    stored_limit: usize,
+) -> Result<serde_json::Value> {
+    let live = document(conn, window, policy)?;
+    let mut peaks: Vec<serde_json::Value> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for dossier in &live.peaks {
+        seen.insert(dossier.id.clone());
+        peaks.push(
+            serde_json::to_value(dossier)
+                .map_err(|err| crate::error::Error::Storage(format!("serialize peak: {err}")))?,
+        );
+    }
+    for stored in query::stored_peaks(conn, window, stored_limit)? {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&stored.payload_json) else {
+            continue;
+        };
+        if value.get("v").and_then(serde_json::Value::as_u64)
+            != Some(u64::from(PEAK_SCHEMA_VERSION))
+        {
+            continue;
+        }
+        let id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(stored.peak_id.as_str())
+            .to_string();
+        if seen.insert(id) {
+            peaks.push(value);
+        }
+    }
+    peaks.sort_by(|left, right| {
+        left.get("start_wall_ns")
+            .and_then(serde_json::Value::as_i64)
+            .cmp(
+                &right
+                    .get("start_wall_ns")
+                    .and_then(serde_json::Value::as_i64),
+            )
+            .then_with(|| {
+                left.get("metric")
+                    .and_then(serde_json::Value::as_str)
+                    .cmp(&right.get("metric").and_then(serde_json::Value::as_str))
+            })
+    });
+    Ok(serde_json::json!({
+        "schema": PEAK_SCHEMA,
+        "v": PEAK_SCHEMA_VERSION,
+        "since_wall_ns": window.since,
+        "until_wall_ns": window.until,
+        "peak_count": peaks.len(),
+        "peaks": peaks,
+    }))
+}
+
 /// Serialize one dossier into a storage row.
 pub fn dossier_row(dossier: &PeakDossier, now_wall_ns: i64) -> Result<PeakDossierRow> {
     let payload_json = serde_json::to_string(dossier)
@@ -740,6 +813,7 @@ fn build_dossier(
         raw.start_wall_ns.saturating_sub(horizon.ns),
         raw.end_wall_ns.saturating_add(horizon.ns),
     );
+
     let series_from = raw.start_wall_ns.saturating_sub(policy.series_ns);
     let series_to = raw.end_wall_ns.saturating_add(policy.series_ns);
     let grid = Window::new(series_from, series_to);
@@ -761,14 +835,24 @@ fn build_dossier(
         })
         .collect();
 
+    let host_series = rollup_values(conn, &host_id, grid, grid_points, raw.metric)?;
+    let host_value = value_at(&host_series, grid, raw.start_wall_ns, raw.end_wall_ns)
+        .or_else(|| (raw.entity_kind == "host").then_some(raw.peak));
+    let host_scale = host_value.filter(|value| *value > 0.0).unwrap_or(raw.peak);
+
     let mut nodes: Vec<PeakNode> = Vec::new();
     let mut edges: Vec<(usize, usize, EdgeKind)> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
 
-    // Host root: always index 0, even when the peak itself is cgroup-scoped.
-    let host_series = rollup_values(conn, &host_id, grid, grid_points, raw.metric)?;
-    let host_value = value_at(&host_series, grid, raw.start_wall_ns, raw.end_wall_ns)
-        .or_else(|| (raw.entity_kind == "host").then_some(raw.peak));
+    // Host root: always index 0, so `share` is a fraction of the host.
+    index.insert(host_id.clone(), 0);
+    let host_base = baseline_of(&host_series, grid, raw.start_wall_ns);
+    // Only a host-scoped peak keeps the host trend; a cgroup peak keeps its own.
+    let host_series = if raw.entity_kind == "host" {
+        host_series
+    } else {
+        Vec::new()
+    };
     nodes.push(PeakNode {
         id: host_id,
         name: host_name,
@@ -776,54 +860,49 @@ fn build_dossier(
         pid: None,
         container: None,
         unit: None,
-        value: host_value,
+        value: host_value.map(|value| round_metric(raw.metric, value)),
         share: Some(1.0),
         own: None,
-        base: baseline_of(&host_series, grid, raw.start_wall_ns),
+        base: host_base.map(|value| round_metric(raw.metric, value)),
         series: host_series,
     });
 
-    // Cgroup/container nodes, highest value first.
-    let mut cgroups: Vec<&EntityUsage> = usage
-        .iter()
-        .filter(|row| row.kind == EntityKind::Cgroup)
-        .collect();
-    cgroups.sort_by(|left, right| {
-        entity_value(right, raw.metric)
-            .unwrap_or(0.0)
-            .total_cmp(&entity_value(left, raw.metric).unwrap_or(0.0))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    let cgroup_slots = policy.max_nodes.saturating_sub(2);
+    let mut scope_index = 0usize;
     let mut selected_cgroups: Vec<usize> = Vec::new();
-    for cgroup in cgroups.into_iter().take(cgroup_slots) {
-        let series_values = rollup_values(conn, &cgroup.entity_id, grid, grid_points, raw.metric)?;
-        let value = value_at(&series_values, grid, raw.start_wall_ns, raw.end_wall_ns)
-            .or_else(|| entity_value(cgroup, raw.metric));
-        let node_index = nodes.len();
-        index.insert(cgroup.entity_id.clone(), node_index);
+
+    if raw.entity_kind == "cgroup" {
+        // Cgroup-scoped peak: the story is the container and its own processes.
+        let scope_usage = usage.iter().find(|row| row.entity_id == raw.entity_id);
+        let scope_series = rollup_values(conn, &raw.entity_id, grid, grid_points, raw.metric)?;
+        let value = value_at(&scope_series, grid, raw.start_wall_ns, raw.end_wall_ns)
+            .or_else(|| scope_usage.and_then(|row| entity_value(row, raw.metric)));
+        scope_index = nodes.len();
+        index.insert(raw.entity_id.clone(), scope_index);
         nodes.push(PeakNode {
-            id: cgroup.entity_id.clone(),
-            name: cgroup.name.clone(),
+            id: raw.entity_id.clone(),
+            name: scope_usage.map_or_else(|| raw.entity_id.clone(), |row| row.name.clone()),
             kind: "cgroup".to_string(),
             pid: None,
-            container: cgroup.container.clone(),
+            container: scope_usage.and_then(|row| row.container.clone()),
             unit: None,
-            value,
-            share: value.map(|value| share(value, raw.peak)),
+            value: value.map(|value| round_metric(raw.metric, value)),
+            share: value.map(|value| round_share(value / host_scale)),
             own: None,
-            base: baseline_of(&series_values, grid, raw.start_wall_ns),
-            series: series_values,
+            base: baseline_of(&scope_series, grid, raw.start_wall_ns)
+                .map(|value| round_metric(raw.metric, value)),
+            series: scope_series,
         });
-        edges.push((0, node_index, EdgeKind::On));
-        selected_cgroups.push(node_index);
-    }
+        edges.push((0, scope_index, EdgeKind::On));
+        selected_cgroups.push(scope_index);
 
-    // Processes are only attributed for metrics that are measured per process.
-    if per_process(raw.metric) {
         let mut processes: Vec<&EntityUsage> = usage
             .iter()
             .filter(|row| row.kind == EntityKind::Process)
+            .filter(|row| {
+                process_meta
+                    .get(row.entity_id.as_str())
+                    .is_some_and(|meta| meta.cgroup.as_deref() == Some(raw.entity_id.as_str()))
+            })
             .collect();
         processes.sort_by(|left, right| {
             entity_value(right, raw.metric)
@@ -831,13 +910,9 @@ fn build_dossier(
                 .total_cmp(&entity_value(left, raw.metric).unwrap_or(0.0))
                 .then_with(|| left.entity_id.cmp(&right.entity_id))
         });
-        let remaining = policy.max_nodes.saturating_sub(nodes.len());
-        for process in processes.into_iter().take(remaining) {
+        let slots = policy.max_nodes.saturating_sub(nodes.len());
+        for process in processes.into_iter().take(slots) {
             let meta = process_meta.get(process.entity_id.as_str());
-            let (parent, kind) = meta
-                .and_then(|meta| meta.cgroup.as_deref())
-                .and_then(|cgroup| index.get(cgroup).copied())
-                .map_or((0, EdgeKind::On), |parent| (parent, EdgeKind::In));
             let value = entity_value(process, raw.metric);
             let node_index = nodes.len();
             index.insert(process.entity_id.clone(), node_index);
@@ -848,31 +923,135 @@ fn build_dossier(
                 pid: meta.map(|meta| meta.pid),
                 container: process.container.clone(),
                 unit: meta.and_then(|meta| meta.unit.clone()),
-                value,
-                share: value.map(|value| share(value, raw.peak)),
-                own: value,
+                value: value.map(|value| round_metric(raw.metric, value)),
+                share: value.map(|value| round_share(value / host_scale)),
+                own: value.map(|value| round_metric(raw.metric, value)),
                 base: None,
                 series: Vec::new(),
             });
-            edges.push((parent, node_index, kind));
+            edges.push((scope_index, node_index, EdgeKind::In));
+        }
+    } else {
+        // Host-scoped peak: only entities whose own level rose explain it.
+        let mut candidates: Vec<CgroupCandidate<'_>> = Vec::new();
+        for cgroup in usage.iter().filter(|row| row.kind == EntityKind::Cgroup) {
+            let series = rollup_values(conn, &cgroup.entity_id, grid, grid_points, raw.metric)?;
+            let value = value_at(&series, grid, raw.start_wall_ns, raw.end_wall_ns)
+                .or_else(|| entity_value(cgroup, raw.metric));
+            let Some(value) = value else {
+                continue;
+            };
+            let base = baseline_of(&series, grid, raw.start_wall_ns);
+            let delta = value - base.unwrap_or(value);
+            if delta > 0.0 {
+                candidates.push((delta, cgroup, series, base, value));
+            }
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .0
+                .total_cmp(&left.0)
+                .then_with(|| left.1.name.cmp(&right.1.name))
+        });
+        let slots = policy.max_nodes.saturating_sub(1);
+        for (_, cgroup, series, base, value) in candidates.into_iter().take(slots) {
+            let node_index = nodes.len();
+            index.insert(cgroup.entity_id.clone(), node_index);
+            nodes.push(PeakNode {
+                id: cgroup.entity_id.clone(),
+                name: cgroup.name.clone(),
+                kind: "cgroup".to_string(),
+                pid: None,
+                container: cgroup.container.clone(),
+                unit: None,
+                value: Some(round_metric(raw.metric, value)),
+                share: Some(round_share(value / host_scale)),
+                own: None,
+                base: base.map(|value| round_metric(raw.metric, value)),
+                series,
+            });
+            edges.push((0, node_index, EdgeKind::On));
+            selected_cgroups.push(node_index);
+        }
+
+        // Processes inside the selected cgroups, ranked by their own value.
+        let mut processes: Vec<(f64, &EntityUsage, Option<usize>)> = usage
+            .iter()
+            .filter(|row| row.kind == EntityKind::Process)
+            .filter_map(|row| {
+                let parent = process_meta
+                    .get(row.entity_id.as_str())
+                    .and_then(|meta| meta.cgroup.as_deref())
+                    .and_then(|cgroup| index.get(cgroup).copied())?;
+                Some((
+                    entity_value(row, raw.metric).unwrap_or(0.0),
+                    row,
+                    Some(parent),
+                ))
+            })
+            .collect();
+        processes.sort_by(|left, right| {
+            right
+                .0
+                .total_cmp(&left.0)
+                .then_with(|| left.1.entity_id.cmp(&right.1.entity_id))
+        });
+        let slots = policy.max_nodes.saturating_sub(nodes.len());
+        for (_, process, parent) in processes.into_iter().take(slots) {
+            let Some(parent) = parent else { continue };
+            let meta = process_meta.get(process.entity_id.as_str());
+            let value = entity_value(process, raw.metric);
+            let node_index = nodes.len();
+            index.insert(process.entity_id.clone(), node_index);
+            nodes.push(PeakNode {
+                id: process.entity_id.clone(),
+                name: process.name.clone(),
+                kind: "process".to_string(),
+                pid: meta.map(|meta| meta.pid),
+                container: process.container.clone(),
+                unit: meta.and_then(|meta| meta.unit.clone()),
+                value: value.map(|value| round_metric(raw.metric, value)),
+                share: value.map(|value| round_share(value / host_scale)),
+                own: value.map(|value| round_metric(raw.metric, value)),
+                base: None,
+                series: Vec::new(),
+            });
+            edges.push((parent, node_index, EdgeKind::In));
         }
     }
 
     // Own value for each cgroup with contained process children.
-    for node_index in selected_cgroups {
-        let own = nodes[node_index].value.map(|value| {
+    for node_index in &selected_cgroups {
+        let own = nodes[*node_index].value.map(|value| {
             let children: f64 = edges
                 .iter()
-                .filter(|(parent, _, kind)| *parent == node_index && *kind == EdgeKind::In)
+                .filter(|(parent, _, kind)| parent == node_index && *kind == EdgeKind::In)
                 .filter_map(|(_, child, _)| nodes[*child].value)
                 .sum();
-            (value - children).max(0.0)
+            round_metric(raw.metric, (value - children).max(0.0))
         });
-        nodes[node_index].own = own;
+        nodes[*node_index].own = own;
     }
 
-    // Correlated evidence: logs, lifecycle events and other peaks over the
-    // wider context window. Everything is bounded and folded by identity.
+    // One series only: the scope's own trend, downsampled to fit an agent.
+    let (series_values, stride) = downsample(&nodes[scope_index].series, MAX_SERIES_POINTS);
+    nodes[scope_index].series = series_values;
+    let series = if nodes[scope_index].series.is_empty() {
+        None
+    } else {
+        Some(PeakSeries {
+            step_ns: MINUTE_NS.saturating_mul(stride as i64),
+            from_wall_ns: series_from,
+            points: nodes[scope_index].series.len(),
+        })
+    };
+    let scope_node_id = nodes[scope_index].id.clone();
+    for node in &mut nodes {
+        if node.id != scope_node_id {
+            node.series = Vec::new();
+        }
+    }
+
     let activity = query::window_activity(conn, context)?;
     let logs = context_logs(conn, &nodes, context, raw.start_wall_ns)?;
     let events = context_events(conn, &nodes, context, raw.start_wall_ns)?;
@@ -890,8 +1069,8 @@ fn build_dossier(
             scope: other.entity_id.clone(),
             start_wall_ns: other.start_wall_ns,
             end_wall_ns: other.end_wall_ns,
-            peak: other.peak,
-            score: score(other),
+            peak: round_metric(other.metric, other.peak),
+            score: round_score(score(other)),
         })
         .collect();
     near.sort_by(|left, right| {
@@ -901,16 +1080,8 @@ fn build_dossier(
             .then_with(|| left.scope.cmp(&right.scope))
     });
 
-    let series = nodes
-        .iter()
-        .any(|node| !node.series.is_empty())
-        .then_some(PeakSeries {
-            step_ns: MINUTE_NS,
-            from_wall_ns: series_from,
-            points: grid_points,
-        });
-
     Ok(PeakDossier {
+        v: PEAK_SCHEMA_VERSION,
         id: format!(
             "{}|{}|{}",
             raw.entity_id,
@@ -926,10 +1097,10 @@ fn build_dossier(
         } else {
             "sustained".to_string()
         },
-        peak: raw.peak,
-        base: raw.base,
-        p99: raw.p99,
-        score: score(raw),
+        peak: round_metric(raw.metric, raw.peak),
+        base: round_metric(raw.metric, raw.base),
+        p99: round_metric(raw.metric, raw.p99),
+        score: round_score(score(raw)),
         nodes,
         edges,
         series,
@@ -939,7 +1110,7 @@ fn build_dossier(
             h: horizon.ns,
             base: horizon.base_ns,
             class: horizon.class,
-            stretch: horizon.stretch,
+            stretch: round_share(horizon.stretch),
         },
         near,
         activity: PeakActivity {
@@ -954,7 +1125,57 @@ fn build_dossier(
     })
 }
 
-/// Fold log records into distinct lines, errors first, then chronological.
+/// A cgroup candidate while a host peak is being explained: (delta, usage, series,
+/// local baseline, value).
+type CgroupCandidate<'a> = (f64, &'a EntityUsage, Vec<Option<f64>>, Option<f64>, f64);
+
+/// Uniform downsampling that keeps the resolution honest: the returned stride is
+/// the real spacing, so `step_ns = stride * 1 min`.
+fn downsample(series: &[Option<f64>], max_points: usize) -> (Vec<Option<f64>>, usize) {
+    if series.len() <= max_points.max(2) {
+        return (series.to_vec(), 1);
+    }
+    let stride = series.len().div_ceil(max_points.max(2));
+    let sampled: Vec<Option<f64>> = series.iter().step_by(stride).copied().collect();
+    (sampled, stride)
+}
+
+/// Byte metrics are whole numbers; percentages keep one decimal.
+fn round_metric(metric: Metric, value: f64) -> f64 {
+    if value.is_finite() {
+        match metric {
+            Metric::Memory | Metric::IoRead | Metric::IoWrite | Metric::NetRx | Metric::NetTx => {
+                value.round()
+            }
+            _ => (value * 10.0).round() / 10.0,
+        }
+    } else {
+        0.0
+    }
+}
+
+/// Shares and other 0..1 fractions keep three decimals.
+fn round_share(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * 1000.0).round() / 1000.0
+    } else {
+        0.0
+    }
+}
+
+fn round_score(value: f64) -> f64 {
+    if value.is_finite() {
+        (value * 100.0).round() / 100.0
+    } else {
+        0.0
+    }
+}
+
+/// Fold log records into distinct lines: warnings and errors only.
+///
+/// Info lines are counted in `activity` but not listed, because a periodic info
+/// log is not evidence for a resource peak. If a peak has no warning/error at
+/// all, the nearest few lines are kept so the episode is not blind.
 fn context_logs(
     conn: &Connection,
     nodes: &[PeakNode],
@@ -970,9 +1191,20 @@ fn context_logs(
         },
     )?;
     records.sort_by_key(|record| record.wall_ns);
+    let mut selected: Vec<&crate::model::LogRecord> = records
+        .iter()
+        .filter(|record| severity_rank(record.level.map(crate::model::Severity::as_str)) <= 1)
+        .collect();
+    if selected.is_empty() {
+        selected = records
+            .iter()
+            .filter(|record| !record.message.is_empty())
+            .take(MAX_FALLBACK_LOGS)
+            .collect();
+    }
     let mut folded: Vec<PeakLog> = Vec::new();
     let mut index: HashMap<(String, String, String), usize> = HashMap::new();
-    for record in records {
+    for record in selected {
         let t = record.wall_ns.saturating_sub(origin_ns);
         let level = record.level.map(|level| level.as_str().to_string());
         let key = (
@@ -984,18 +1216,18 @@ fn context_logs(
             let line = &mut folded[*position];
             line.n = line.n.saturating_add(1);
             line.last_t = Some(t);
-        } else {
-            index.insert(key, folded.len());
-            folded.push(PeakLog {
-                t,
-                node: log_node(nodes, &record),
-                src: record.source_id,
-                lvl: level,
-                msg: record.message,
-                n: 1,
-                last_t: None,
-            });
+            continue;
         }
+        index.insert(key, folded.len());
+        folded.push(PeakLog {
+            t,
+            node: log_node(nodes, record),
+            src: record.source_id.clone(),
+            lvl: level,
+            msg: record.message.clone(),
+            n: 1,
+            last_t: None,
+        });
     }
     folded.sort_by(|left, right| {
         severity_rank(left.lvl.as_deref())
@@ -1008,7 +1240,10 @@ fn context_logs(
     Ok(folded)
 }
 
-/// Fold lifecycle events into distinct entries, chronological.
+/// Fold lifecycle events: only kinds that can explain a resource peak.
+///
+/// Unattributed process start/exit bursts collapse into one entry per kind, so a
+/// fork bomb is one counted `process_started` entry, not forty lines.
 fn context_events(
     conn: &Connection,
     nodes: &[PeakNode],
@@ -1027,29 +1262,38 @@ fn context_events(
     let mut folded: Vec<PeakEvent> = Vec::new();
     let mut index: HashMap<(String, String, String), usize> = HashMap::new();
     for record in records {
+        let kind = record.kind.as_str();
+        if !VITAL_EVENTS.contains(&kind) {
+            continue;
+        }
         let t = record.wall_ns.saturating_sub(origin_ns);
         let (node, pid, what) = event_label(record.entity_id.as_deref(), nodes);
-        let key = (
-            record.kind.as_str().to_string(),
-            record.entity_id.clone().unwrap_or_default(),
-            record.payload.to_string(),
-        );
+        // Unattributed process churn is aggregated by kind; the PID adds nothing.
+        let key = if node.is_none() && pid.is_some() {
+            (kind.to_string(), String::new(), String::new())
+        } else {
+            (
+                kind.to_string(),
+                record.entity_id.clone().unwrap_or_default(),
+                record.payload.to_string(),
+            )
+        };
         if let Some(position) = index.get(&key) {
             let event = &mut folded[*position];
             event.n = event.n.saturating_add(1);
             event.last_t = Some(t);
-        } else {
-            index.insert(key, folded.len());
-            folded.push(PeakEvent {
-                t,
-                kind: record.kind.as_str().to_string(),
-                node,
-                pid,
-                what,
-                n: 1,
-                last_t: None,
-            });
+            continue;
         }
+        index.insert(key, folded.len());
+        folded.push(PeakEvent {
+            t,
+            kind: kind.to_string(),
+            node,
+            pid,
+            what,
+            n: 1,
+            last_t: None,
+        });
     }
     folded.truncate(MAX_CONTEXT_EVENTS);
     Ok(folded)
@@ -1131,14 +1375,6 @@ fn rollup_point_at(
     .next())
 }
 
-fn share(value: f64, peak: f64) -> f64 {
-    if peak > 0.0 {
-        (value / peak).clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
 fn entity_value(usage: &EntityUsage, metric: Metric) -> Option<f64> {
     match metric {
         Metric::Cpu => usage.cpu_max_pct.or(usage.cpu_avg_pct),
@@ -1218,6 +1454,7 @@ mod tests {
             min_sustain: 1,
             max_peaks: 20,
             max_nodes: 16,
+            min_score: 1.02,
             series_ns: 10 * MINUTE_NS,
             detect_ns: 30 * MINUTE_NS,
             context_scale: 1.0,
@@ -1429,8 +1666,14 @@ mod tests {
             "process containment edge: {:?}",
             peak.edges
         );
-        // The process has no rollup series, so it must not pretend to have one.
+        // Only the scope node carries a series; the rest would just bloat it.
         assert_eq!(peak.nodes[process].series.len(), 0);
+        let with_series = peak
+            .nodes
+            .iter()
+            .filter(|node| !node.series.is_empty())
+            .count();
+        assert_eq!(with_series, 1, "one series per peak");
         // Every retained series is aligned to the shared grid.
         let series = peak.series.as_ref().expect("grid");
         for node in &peak.nodes {
@@ -1439,6 +1682,12 @@ mod tests {
             }
         }
         assert!(peak.nodes[cgroup].own.is_some());
+        // Shares are fractions of the host, not clamped 1.0 for every node.
+        let cgroup_share = peak.nodes[cgroup].share.expect("cgroup share");
+        assert!(
+            cgroup_share > 0.0 && cgroup_share < 1.0,
+            "cgroup share {cgroup_share}"
+        );
         // Containment must not claim more than the cgroup's own value.
         let cgroup_value = peak.nodes[cgroup].value.unwrap();
         let child_sum: f64 = peak
@@ -1564,6 +1813,7 @@ mod tests {
         assert!(!first.contains("NaN"));
         assert!(!first.contains("Infinity"));
         assert!(first.contains("\"schema\":\"sarf.peak\""));
+        // Size guard: an agent artifact must stay small. The seeded document has`n        // two peaks; > 20 KiB means a node/log/event field grew out of control.`n        assert!(`n            first.len() < 20_000,`n            "peak document grew to {} bytes",`n            first.len()`n        );
     }
 
     #[test]

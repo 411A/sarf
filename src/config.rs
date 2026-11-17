@@ -423,6 +423,9 @@ pub struct Peaks {
     pub min_sustain: u64,
     /// Maximum peaks per document / per stored pass.
     pub max_peaks: u64,
+    /// Minimum score (peak / p99); below this the peak is indistinguishable
+    /// from the recent p99 and is dropped as noise.
+    pub min_score: f64,
     /// Maximum graph nodes retained per peak (host included).
     pub max_nodes: u64,
     /// Minutes of history kept before and after each peak in the series.
@@ -441,8 +444,9 @@ impl Default for Peaks {
             baseline_mins: 60,
             mad_k: 3.0,
             min_sustain: 1,
-            max_peaks: 20,
-            max_nodes: 16,
+            max_peaks: 10,
+            max_nodes: 8,
+            min_score: 1.02,
             series_mins: 10,
             context_scale: 1.0,
             detect_mins: 30,
@@ -754,6 +758,7 @@ impl Config {
         check_range("peaks.mad_k", peaks.mad_k, 1.0, 20.0)?;
         check_range("peaks.min_sustain", peaks.min_sustain as f64, 1.0, 60.0)?;
         check_range("peaks.max_peaks", peaks.max_peaks as f64, 1.0, 500.0)?;
+        check_range("peaks.min_score", peaks.min_score, 1.0, 1000.0)?;
         check_range("peaks.max_nodes", peaks.max_nodes as f64, 2.0, 128.0)?;
         check_range("peaks.series_mins", peaks.series_mins as f64, 1.0, 120.0)?;
         check_range("peaks.context_scale", peaks.context_scale, 0.25, 4.0)?;

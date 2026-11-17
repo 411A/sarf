@@ -560,5 +560,36 @@ it something may sit and still be called correlated. Everything stays bounded an
 deterministic, and missing data is still omitted rather than zeroed. The payload is
 capped at 128 KiB by the writer.
 
+### Amendment 2 - schema v3: one compact document an agent can hold
+
+A 72-hour dump on a 20-container host reached 160 KB: every peak repeated the whole
+host topology (15 cgroups, `share: 1.0` on all of them), 20-26 series points per node,
+40 log lines including periodic info chatter, and dozens of `process_exec` events.
+That is a data lake, not a diagnosis.
+
+Schema v3:
+
+- **Focus instead of the whole host.** A cgroup/unit peak carries the host, the scope
+  and the scope's own processes. A host peak carries only the cgroups whose own level
+  *rose* over their local baseline (positive delta, capped) plus their processes.
+  `share` is `value / host value`, so it is no longer clamped to 1.0 for every node.
+- **One series.** Only the scope node keeps a series, downsampled to 12 points on an
+  honest uniform grid (`step_ns` is the real spacing).
+- **Vital logs only.** Warnings/errors/criticals, deduplicated, cap 8; info lines are
+  counted in `activity` but never listed. If there is no warning at all, the nearest
+  few lines are kept so the peak is not blind.
+- **Vital events only.** Start/exit, container lifecycle, incidents, gaps and
+  degradations; `process_exec` is dropped, an unattributed process burst collapses
+  into one counted entry, cap 10.
+- **Noise floor.** `[peaks].min_score` (1.02) drops candidates statistically
+  indistinguishable from the recent p99 (a 1.0005 "peak" is not a peak).
+- **One document.** `sarf peaks` merges fresh detection with stored dossiers by id
+  and returns everything in the window at once; there is no streaming or split view.
+  Each dossier is self-identifying with `v`, so old payloads are never mixed in.
+
+Result: ~1.5-2 KB per peak (measured 6.8 KB for a 4-peak fixture), a 10-peak hour is
+about 20 KB. `max_peaks` defaults to 10 and `max_nodes` to 8.
+
+
 
 
