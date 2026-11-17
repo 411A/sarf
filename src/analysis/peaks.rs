@@ -24,17 +24,25 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::error::Result;
 use crate::model::{EntityKind, Metric};
-use crate::store::query::{self, EntityUsage, RollupPoint, Window};
+use crate::store::query::{self, EntityUsage, EventFilter, LogFilter, RollupPoint, Window};
 use crate::store::PeakDossierRow;
 
 /// Stable document schema name for machine consumers.
 pub const PEAK_SCHEMA: &str = "sarf.peak";
 /// Version of the peak document.
-pub const PEAK_SCHEMA_VERSION: u32 = 1;
+pub const PEAK_SCHEMA_VERSION: u32 = 2;
 /// One bucket of the detection series.
 const MINUTE_NS: i64 = 60_000_000_000;
 /// Minimum baseline points before a peak can be claimed.
 const MIN_HISTORY: usize = 5;
+/// Rows read before folding; folding then caps what is retained.
+const MAX_CONTEXT_READ: usize = 2_000;
+/// Distinct log lines retained per peak.
+const MAX_CONTEXT_LOGS: usize = 40;
+/// Distinct events retained per peak.
+const MAX_CONTEXT_EVENTS: usize = 40;
+/// Coincident peaks listed per peak.
+const MAX_NEAR: usize = 8;
 /// Metrics with a per-entity time series.
 const METRICS: [Metric; 9] = [
     Metric::Cpu,
@@ -67,6 +75,8 @@ pub struct PeakPolicy {
     pub series_ns: i64,
     /// Look-back window used by each daemon detection pass.
     pub detect_ns: i64,
+    /// Context collected before and after each peak (logs, events, neighbours).
+    pub context_ns: i64,
     /// How long stored dossiers are retained.
     pub retain_ns: i64,
 }
@@ -84,6 +94,7 @@ impl PeakPolicy {
             max_nodes: (peaks.max_nodes as usize).max(2),
             series_ns: (peaks.series_mins as i64).max(1) * MINUTE_NS,
             detect_ns: (peaks.detect_mins as i64).max(1) * MINUTE_NS,
+            context_ns: (peaks.context_mins as i64).max(0) * MINUTE_NS,
             retain_ns: (peaks.retain_hours as i64).max(1) * 60 * MINUTE_NS,
         }
     }
@@ -153,8 +164,89 @@ pub struct PeakDossier {
     /// Grid the node series are aligned to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<PeakSeries>,
-    /// Events and logs observed in the episode.
+    /// Window that logs, events and coincident peaks were collected from.
+    pub win: PeakWindow,
+    /// Other peaks that overlap or touch the same context window.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub near: Vec<NearPeak>,
+    /// Events and logs counted over `win`.
     pub activity: PeakActivity,
+    /// Distinct log lines around the peak, errors first, chronological.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<PeakLog>,
+    /// Distinct lifecycle events around the peak, chronological.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<PeakEvent>,
+}
+
+/// Context window used for correlated evidence (logs, events, other peaks).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct PeakWindow {
+    /// Start, wall clock.
+    pub from_wall_ns: i64,
+    /// End, wall clock.
+    pub to_wall_ns: i64,
+}
+
+/// Another peak close enough to be part of the same story.
+#[derive(Debug, Clone, Serialize)]
+pub struct NearPeak {
+    /// Metric name.
+    pub metric: String,
+    /// Entity the other peak was detected on.
+    pub scope: String,
+    /// Start.
+    pub start_wall_ns: i64,
+    /// End.
+    pub end_wall_ns: i64,
+    /// Peak value.
+    pub peak: f64,
+    /// Detection score.
+    pub score: f64,
+}
+
+/// One distinct log line around the peak.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeakLog {
+    /// Offset from the peak start (negative = before).
+    pub t: i64,
+    /// Node index when the line can be attributed to a graph node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<usize>,
+    /// Source id (`docker:<container>`, `file:<path>`, ...).
+    pub src: String,
+    /// Severity when the line has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lvl: Option<String>,
+    /// Bounded message.
+    pub msg: String,
+    /// How often the same line was observed.
+    pub n: u32,
+    /// Offset of the last repetition, when it repeated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_t: Option<i64>,
+}
+
+/// One distinct lifecycle event around the peak.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeakEvent {
+    /// Offset from the peak start (negative = before).
+    pub t: i64,
+    /// Event kind.
+    pub kind: String,
+    /// Node index when the event belongs to a graph node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<usize>,
+    /// Host PID when the event is process-scoped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// Short description (node/process name or entity id).
+    pub what: String,
+    /// How often the same event was observed.
+    pub n: u32,
+    /// Offset of the last repetition, when it repeated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_t: Option<i64>,
 }
 
 /// Graph node: host, cgroup/container or process.
@@ -457,9 +549,10 @@ pub fn build_dossiers(
     policy: &PeakPolicy,
 ) -> Result<Vec<PeakDossier>> {
     let host = query::host_entity(conn)?;
+    let detected = detect(conn, window, policy)?;
     let mut dossiers = Vec::new();
-    for raw in detect(conn, window, policy)? {
-        dossiers.push(build_dossier(conn, &raw, host.as_ref(), policy)?);
+    for raw in &detected {
+        dossiers.push(build_dossier(conn, raw, &detected, host.as_ref(), policy)?);
     }
     Ok(dossiers)
 }
@@ -526,10 +619,15 @@ pub fn dossier_row(dossier: &PeakDossier, now_wall_ns: i64) -> Result<PeakDossie
 fn build_dossier(
     conn: &Connection,
     raw: &RawPeak,
+    all: &[RawPeak],
     host: Option<&(String, String)>,
     policy: &PeakPolicy,
 ) -> Result<PeakDossier> {
     let window = Window::new(raw.start_wall_ns, raw.end_wall_ns);
+    let context = Window::new(
+        raw.start_wall_ns.saturating_sub(policy.context_ns),
+        raw.end_wall_ns.saturating_add(policy.context_ns),
+    );
     let series_from = raw.start_wall_ns.saturating_sub(policy.series_ns);
     let series_to = raw.end_wall_ns.saturating_add(policy.series_ns);
     let grid = Window::new(series_from, series_to);
@@ -664,7 +762,36 @@ fn build_dossier(
         nodes[node_index].own = own;
     }
 
-    let activity = query::window_activity(conn, window)?;
+    // Correlated evidence: logs, lifecycle events and other peaks over the
+    // wider context window. Everything is bounded and folded by identity.
+    let activity = query::window_activity(conn, context)?;
+    let logs = context_logs(conn, &nodes, context, raw.start_wall_ns)?;
+    let events = context_events(conn, &nodes, context, raw.start_wall_ns)?;
+    let mut near: Vec<NearPeak> = all
+        .iter()
+        .filter(|other| {
+            let same = other.entity_id == raw.entity_id
+                && other.metric == raw.metric
+                && other.start_wall_ns == raw.start_wall_ns;
+            !same && other.start_wall_ns < context.until && other.end_wall_ns > context.since
+        })
+        .take(MAX_NEAR)
+        .map(|other| NearPeak {
+            metric: other.metric.as_str().to_string(),
+            scope: other.entity_id.clone(),
+            start_wall_ns: other.start_wall_ns,
+            end_wall_ns: other.end_wall_ns,
+            peak: other.peak,
+            score: score(other),
+        })
+        .collect();
+    near.sort_by(|left, right| {
+        left.start_wall_ns
+            .cmp(&right.start_wall_ns)
+            .then_with(|| left.metric.cmp(&right.metric))
+            .then_with(|| left.scope.cmp(&right.scope))
+    });
+
     let series = nodes
         .iter()
         .any(|node| !node.series.is_empty())
@@ -697,6 +824,11 @@ fn build_dossier(
         nodes,
         edges,
         series,
+        win: PeakWindow {
+            from_wall_ns: context.since,
+            to_wall_ns: context.until,
+        },
+        near,
         activity: PeakActivity {
             starts: activity.process_starts,
             exits: activity.process_exits,
@@ -704,7 +836,171 @@ fn build_dossier(
             logs: activity.logs,
             errors: activity.errors,
         },
+        logs,
+        events,
     })
+}
+
+/// Fold log records into distinct lines, errors first, then chronological.
+fn context_logs(
+    conn: &Connection,
+    nodes: &[PeakNode],
+    context: Window,
+    origin_ns: i64,
+) -> Result<Vec<PeakLog>> {
+    let mut records = query::logs(
+        conn,
+        &LogFilter {
+            window: Some(context),
+            limit: MAX_CONTEXT_READ,
+            ..LogFilter::default()
+        },
+    )?;
+    records.sort_by_key(|record| record.wall_ns);
+    let mut folded: Vec<PeakLog> = Vec::new();
+    let mut index: HashMap<(String, String, String), usize> = HashMap::new();
+    for record in records {
+        let t = record.wall_ns.saturating_sub(origin_ns);
+        let level = record.level.map(|level| level.as_str().to_string());
+        let key = (
+            record.source_id.clone(),
+            level.clone().unwrap_or_default(),
+            record.message.clone(),
+        );
+        if let Some(position) = index.get(&key) {
+            let line = &mut folded[*position];
+            line.n = line.n.saturating_add(1);
+            line.last_t = Some(t);
+        } else {
+            index.insert(key, folded.len());
+            folded.push(PeakLog {
+                t,
+                node: log_node(nodes, &record),
+                src: record.source_id,
+                lvl: level,
+                msg: record.message,
+                n: 1,
+                last_t: None,
+            });
+        }
+    }
+    folded.sort_by(|left, right| {
+        severity_rank(left.lvl.as_deref())
+            .cmp(&severity_rank(right.lvl.as_deref()))
+            .then_with(|| left.t.cmp(&right.t))
+            .then_with(|| left.msg.cmp(&right.msg))
+    });
+    folded.truncate(MAX_CONTEXT_LOGS);
+    folded.sort_by_key(|line| line.t);
+    Ok(folded)
+}
+
+/// Fold lifecycle events into distinct entries, chronological.
+fn context_events(
+    conn: &Connection,
+    nodes: &[PeakNode],
+    context: Window,
+    origin_ns: i64,
+) -> Result<Vec<PeakEvent>> {
+    let mut records = query::events(
+        conn,
+        &EventFilter {
+            window: Some(context),
+            limit: MAX_CONTEXT_READ,
+            ..EventFilter::default()
+        },
+    )?;
+    records.sort_by_key(|record| record.wall_ns);
+    let mut folded: Vec<PeakEvent> = Vec::new();
+    let mut index: HashMap<(String, String, String), usize> = HashMap::new();
+    for record in records {
+        let t = record.wall_ns.saturating_sub(origin_ns);
+        let (node, pid, what) = event_label(record.entity_id.as_deref(), nodes);
+        let key = (
+            record.kind.as_str().to_string(),
+            record.entity_id.clone().unwrap_or_default(),
+            record.payload.to_string(),
+        );
+        if let Some(position) = index.get(&key) {
+            let event = &mut folded[*position];
+            event.n = event.n.saturating_add(1);
+            event.last_t = Some(t);
+        } else {
+            index.insert(key, folded.len());
+            folded.push(PeakEvent {
+                t,
+                kind: record.kind.as_str().to_string(),
+                node,
+                pid,
+                what,
+                n: 1,
+                last_t: None,
+            });
+        }
+    }
+    folded.truncate(MAX_CONTEXT_EVENTS);
+    Ok(folded)
+}
+
+/// Node index for a log record, when the source or entity maps to a node.
+fn log_node(nodes: &[PeakNode], record: &crate::model::LogRecord) -> Option<usize> {
+    if let Some(entity) = record.entity_id.as_deref() {
+        if let Some(index) = nodes.iter().position(|node| node.id == entity) {
+            return Some(index);
+        }
+        if let Some(short) = entity.strip_prefix("container:") {
+            if let Some(index) = nodes
+                .iter()
+                .position(|node| node.container.as_deref() == Some(short))
+            {
+                return Some(index);
+            }
+        }
+    }
+    let name = record.source_id.strip_prefix("docker:")?;
+    nodes
+        .iter()
+        .position(|node| node.name == name || node.container.as_deref() == Some(name))
+}
+
+/// Node index, PID and short label for an event entity.
+fn event_label(entity: Option<&str>, nodes: &[PeakNode]) -> (Option<usize>, Option<u32>, String) {
+    let Some(entity) = entity else {
+        return (None, None, "-".to_string());
+    };
+    if let Some(index) = nodes.iter().position(|node| node.id == entity) {
+        let node = &nodes[index];
+        return (Some(index), node.pid, node.name.clone());
+    }
+    if let Some(short) = entity.strip_prefix("container:") {
+        return nodes
+            .iter()
+            .position(|node| node.container.as_deref() == Some(short))
+            .map_or_else(
+                || (None, None, format!("container {short}")),
+                |index| (Some(index), None, nodes[index].name.clone()),
+            );
+    }
+    if let Some(rest) = entity.strip_prefix("proc:") {
+        if let Some(pid) = rest
+            .split(':')
+            .nth(1)
+            .and_then(|value| value.parse::<u32>().ok())
+        {
+            return (None, Some(pid), format!("pid {pid}"));
+        }
+    }
+    (None, None, entity.to_string())
+}
+
+/// Severity ordering for the bounded log list: errors first.
+fn severity_rank(level: Option<&str>) -> u8 {
+    match level {
+        Some("critical" | "error") => 0,
+        Some("warn") => 1,
+        Some("info") => 2,
+        _ => 3,
+    }
 }
 
 fn share(value: f64, peak: f64) -> f64 {
@@ -796,6 +1092,7 @@ mod tests {
             max_nodes: 16,
             series_ns: 10 * MINUTE_NS,
             detect_ns: 30 * MINUTE_NS,
+            context_ns: 5 * MINUTE_NS,
             retain_ns: 72 * 60 * MINUTE_NS,
         }
     }
@@ -924,6 +1221,11 @@ mod tests {
             } else {
                 2.0
             };
+            let net_rx = if (70..=72).contains(&minute) {
+                9_000_000.0
+            } else {
+                1000.0
+            };
             for (entity, kind, cpu) in [
                 ("host:a", "host", host_cpu),
                 ("cgroup:1:20", "cgroup", cgroup_cpu),
@@ -932,12 +1234,34 @@ mod tests {
                     "INSERT INTO rollup_1m(bucket_wall_ns, entity_id, entity_kind, sample_count,
                         cpu_max_pct, memory_max_bytes, io_read_bytes, io_write_bytes,
                         net_rx_bytes, net_tx_bytes, psi_cpu_max)
-                     VALUES (?1, ?2, ?3, 12, ?4, 104857600, 0, 0, 0, 0, 1.0)",
-                    rusqlite::params![bucket, entity, kind, cpu],
+                     VALUES (?1, ?2, ?3, 12, ?4, 104857600, 0, 0, ?5, 0, 1.0)",
+                    rusqlite::params![bucket, entity, kind, cpu, net_rx],
                 )
                 .unwrap();
             }
         }
+        // Container logs and one lifecycle event around the peak.
+        for (minute, level, message) in [
+            (69i64, "warn", "slow request"),
+            (70, "error", "upstream timed out"),
+            (71, "error", "upstream timed out"),
+            (72, "error", "upstream timed out"),
+        ] {
+            conn.execute(
+                "INSERT INTO logs(wall_ts_ns, entity_id, source_id, stream, level, message,
+                    truncated, redacted)
+                 VALUES (?1, 'container:abc', 'docker:utazbot_tgbot', 'stdout', ?2, ?3, 0, 0)",
+                rusqlite::params![base + minute * MINUTE_NS, level, message],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO events(wall_ts_ns, entity_id, kind, severity, payload_json,
+                provenance, lost_before)
+             VALUES (?1, 'proc:a:4242:1', 'process_started', 'info', '{}', 'test', 0)",
+            rusqlite::params![base + 70 * MINUTE_NS + 1],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -997,6 +1321,39 @@ mod tests {
             .sum();
         assert!(peak.nodes[cgroup].own.unwrap() <= cgroup_value);
         assert!(child_sum >= 0.0);
+
+        // Correlated evidence over the wider context window.
+        assert!(peak.win.from_wall_ns < peak.start_wall_ns);
+        assert!(peak.win.to_wall_ns > peak.end_wall_ns);
+        let error = peak
+            .logs
+            .iter()
+            .find(|line| line.msg == "upstream timed out")
+            .expect("container log line");
+        assert_eq!(error.node, Some(cgroup), "logs map to the container node");
+        assert_eq!(error.lvl.as_deref(), Some("error"));
+        assert_eq!(error.n, 3, "identical lines fold with a count");
+        assert!(error.last_t.is_some());
+        assert!(peak.logs.iter().any(|line| line.msg == "slow request"));
+        let started = peak
+            .events
+            .iter()
+            .find(|event| event.kind == "process_started")
+            .expect("lifecycle event");
+        assert_eq!(started.node, Some(process));
+        assert_eq!(started.pid, Some(4242));
+        assert_eq!(started.what, "python");
+        assert!(peak.activity.errors >= 3);
+        // A coincident network peak is listed as a neighbour, never itself.
+        assert!(
+            peak.near.iter().any(|other| other.metric == "net_rx"),
+            "near: {:?}",
+            peak.near
+        );
+        assert!(peak
+            .near
+            .iter()
+            .all(|other| !(other.metric == "cpu" && other.scope == "host:a")));
     }
 
     #[test]

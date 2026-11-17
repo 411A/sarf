@@ -99,6 +99,9 @@ min_sustain = 1
 max_peaks = 20
 max_nodes = 16
 series_mins = 10
+# Logs, events and coincident peaks are collected this many minutes before and
+# after the episode, so an agent sees what led to the peak and what followed.
+context_mins = 5
 detect_mins = 30
 
 [integrations]

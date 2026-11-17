@@ -427,6 +427,8 @@ pub struct Peaks {
     pub max_nodes: u64,
     /// Minutes of history kept before and after each peak in the series.
     pub series_mins: u64,
+    /// Minutes of logs, events and coincident peaks collected around a peak.
+    pub context_mins: u64,
     /// Look-back window used by the daemon on each detection pass.
     pub detect_mins: u64,
 }
@@ -442,6 +444,7 @@ impl Default for Peaks {
             max_peaks: 20,
             max_nodes: 16,
             series_mins: 10,
+            context_mins: 5,
             detect_mins: 30,
         }
     }
@@ -753,6 +756,7 @@ impl Config {
         check_range("peaks.max_peaks", peaks.max_peaks as f64, 1.0, 500.0)?;
         check_range("peaks.max_nodes", peaks.max_nodes as f64, 2.0, 128.0)?;
         check_range("peaks.series_mins", peaks.series_mins as f64, 1.0, 120.0)?;
+        check_range("peaks.context_mins", peaks.context_mins as f64, 0.0, 120.0)?;
         check_range("peaks.detect_mins", peaks.detect_mins as f64, 1.0, 240.0)?;
         let retention = &self.retention;
         check_range(

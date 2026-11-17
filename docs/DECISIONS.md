@@ -529,4 +529,26 @@ additive and does not change the document.
 **Upgrade path.** Feed `sarf peaks -o peaks.json` to an agent unchanged; add an
 `--explain` mode or eBPF frames later without changing `schema`/`v`.
 
+### Amendment - correlated evidence around the peak (schema v2)
+
+The first dossier carried only counts. An agent asked to diagnose a peak needs the
+*evidence* around it, so schema v2 adds a context window:
+
+- `win` = `[start - context_mins, end + context_mins]` (default 5 minutes each side),
+  the window every correlated read uses.
+- `logs`: distinct lines from all sources in `win`, folded by (source, level, message)
+  with `n` and `last_t`, errors/criticals first then chronological, capped at 40.
+  `node` is the graph index when the line's entity or `docker:<container>` source maps
+  to a node, so container logs land on the container that produced them.
+- `events`: lifecycle events folded by (kind, entity, payload) with the node index,
+  PID and short label, capped at 40.
+- `near`: other peaks (any entity/metric) whose interval overlaps `win`, capped at 8,
+  so a CPU peak and a coincident I/O or network peak read as one story instead of
+  separate documents.
+- `activity` counts now cover `win` too, so the counters and the listed lines agree.
+
+Everything stays bounded and deterministic, and missing data is still omitted rather
+than zeroed. The payload is capped at 128 KiB by the writer.
+
+
 

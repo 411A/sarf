@@ -206,24 +206,44 @@ It answers "what was consuming the host, and what is related to it?":
 - **Bounded series.** `series` is a 1-minute grid (`step_ns`, `from_wall_ns`,
   `points`) and each retained node carries values aligned to it. A missing bucket is
   `null`, never `0`.
+- **Correlated evidence.** `win` is the context window actually searched
+  (`[peaks].context_mins` before and after the episode). Inside it, `logs` folds
+  distinct container/file log lines (errors first, then chronological) with their
+  source, level, repeat count and the `node` they belong to; `events` does the same for
+  lifecycle events (`process_started`, `container_started`, `incident_opened`, ...)
+  with the node index, PID and short label; `near` lists other peaks (any metric or
+  scope) that overlap the same window, so a CPU peak and an I/O or network peak at the
+  same minute are visible as one story.
 - **72-hour retention.** The daemon detects peaks on its retention cadence and stores
   compact dossiers in `peak_dossiers` (`[peaks].retain_hours`, default 72). They stay
   readable after raw samples expire; `--stored` reads them, the default recomputes
   from rollups.
 
 ```json
-{"schema":"sarf.peak","v":1,"peak_count":1,
+{"schema":"sarf.peak","v":2,"peak_count":1,
  "peaks":[{"id":"host:a|cpu|1700000000000000000","metric":"cpu","scope":"host:a",
            "shape":"sustained","peak":96.0,"base":8.0,"p99":9.0,"score":10.6,
            "nodes":[{"id":"host:a","name":"nila","kind":"host","value":96.0,"share":1.0},
                     {"id":"cgroup:1:20","name":"utazbot_tgbot","kind":"cgroup",
-                     "value":70.0,"share":0.73,"own":40.0},
+                     "container":"7146509d0204","value":70.0,"share":0.73,"own":40.0},
                     {"id":"proc:a:4242:1","name":"python","kind":"process","pid":4242,
                      "value":30.0,"share":0.31}],
            "edges":[[0,1,"on"],[1,2,"in"]],
            "series":{"step_ns":60000000000,"from_wall_ns":1700000000000000000,"points":13},
-           "activity":{"starts":4,"exits":2,"events":9,"logs":12,"errors":3}}]}
+           "win":{"from_wall_ns":1700000000000000000,"to_wall_ns":1700000000000000000},
+           "near":[{"metric":"net_rx","scope":"host:a","start_wall_ns":…,"end_wall_ns":…,
+                    "peak":9000000.0,"score":4.2}],
+           "activity":{"starts":4,"exits":2,"events":9,"logs":12,"errors":3},
+           "logs":[{"t":-42000000000,"node":1,"src":"docker:utazbot_tgbot","lvl":"error",
+                    "msg":"upstream timed out","n":3,"last_t":-120000000000}],
+           "events":[{"t":1500000000,"kind":"process_started","node":2,"pid":4242,
+                      "what":"python","n":1}]}]}
 ```
+
+`t` is an offset in nanoseconds from the peak start, negative before it, so an agent
+can order evidence without parsing timestamps. `node` is an index into `nodes`;
+it is omitted when a line or event cannot be attributed to the graph. Everything is
+bounded (`40` log lines, `40` events, `8` neighbours per peak) and deterministic.
 
 What it does **not** claim: stack-level or instruction-level attribution. There is no
 eBPF/perf sampling, so the graph explains which host/cgroup/process carried the cost,
