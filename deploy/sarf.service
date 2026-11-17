@@ -49,9 +49,11 @@ CPUWeight=1
 IOWeight=1
 
 # MemoryMax is a safety ceiling against runaway growth, not the expected RSS.
-# Normal operation is far below 64M; exceeding it is a bug and should be
-# reported with `sarf doctor`, `sarf status` and the service journal.
-MemoryMax=64M
+# The original 64M ceiling was reached by full-observation deployments with
+# several containers and a 100M database; 128M leaves headroom while still
+# catching runaway growth. Report unexpected peaks with `sarf doctor`,
+# `sarf status` and the service journal.
+MemoryMax=128M
 TasksMax=8
 
 # Hardening. ProtectSystem=strict makes the whole filesystem read-only; the

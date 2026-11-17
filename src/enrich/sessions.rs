@@ -5,9 +5,16 @@
 //! machine-readable PID→pane mapping in v0.1, so only session existence is recorded;
 //! pane topology stays a documented gap (guide §5.10, §19).
 
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::run_bounded;
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+#[cfg(unix)]
+use super::run_bounded_as;
+use super::{find_in_path, run_bounded};
 
 /// Discovery timeout for one session-manager query.
 pub const SESSION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -59,8 +66,74 @@ pub struct SessionDiscovery {
 }
 
 /// Discover tmux panes with one bounded format-string query.
+///
+/// tmux sockets are per-user. When SARF runs as root with `PrivateTmp=no`, scan
+/// `/tmp/tmux-*` and query each socket explicitly with `tmux -S`. The client is
+/// executed as the socket owner, not as root, so a malicious socket cannot
+/// exercise root privileges. The default current-user query remains the fallback.
 pub fn discover_tmux() -> SessionDiscovery {
     let format = "#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}";
+    if find_in_path("tmux").is_none() {
+        return SessionDiscovery {
+            available: false,
+            panes: Vec::new(),
+            sessions: Vec::new(),
+            error: Some("tmux not installed".to_string()),
+        };
+    }
+
+    #[cfg(unix)]
+    {
+        let sockets = tmux_socket_paths();
+        if !sockets.is_empty() {
+            let count = sockets.len();
+            let mut panes = Vec::new();
+            let mut succeeded = false;
+            let mut last_error = None;
+            for socket in sockets {
+                let Ok(metadata) = std::fs::metadata(&socket) else {
+                    continue;
+                };
+                let args = tmux_socket_args(&socket, format);
+                match run_bounded_as(
+                    "tmux",
+                    &args,
+                    SESSION_TIMEOUT,
+                    512 * 1024,
+                    metadata.uid(),
+                    metadata.gid(),
+                ) {
+                    Ok(output) if output.success => {
+                        succeeded = true;
+                        panes.extend(parse_tmux_panes(&output.stdout));
+                    }
+                    Ok(output) => {
+                        last_error = Some(if output.timed_out {
+                            "tmux list-panes timed out".to_string()
+                        } else {
+                            "tmux server closed the query".to_string()
+                        });
+                    }
+                    Err(err) => last_error = Some(err.to_string()),
+                }
+            }
+            if succeeded {
+                return discovery_from_panes(panes);
+            }
+            return SessionDiscovery {
+                available: true,
+                panes: Vec::new(),
+                sessions: Vec::new(),
+                error: Some(format!(
+                    "no tmux server is visible to the service user (scanned {count} socket(s){})",
+                    last_error
+                        .map(|error| format!("; last error: {error}"))
+                        .unwrap_or_default()
+                )),
+            };
+        }
+    }
+
     let args = vec![
         "list-panes".to_string(),
         "-a".to_string(),
@@ -68,34 +141,18 @@ pub fn discover_tmux() -> SessionDiscovery {
         format.to_string(),
     ];
     match run_bounded("tmux", &args, SESSION_TIMEOUT, 512 * 1024) {
-        Ok(output) if output.success => {
-            let panes = parse_tmux_panes(&output.stdout);
-            let mut sessions: Vec<String> =
-                panes.iter().map(|pane| pane.session_name.clone()).collect();
-            sessions.sort();
-            sessions.dedup();
-            SessionDiscovery {
-                available: true,
-                panes,
-                sessions,
-                error: None,
-            }
-        }
-        Ok(output) => {
-            let message = if output.timed_out {
+        Ok(output) if output.success => discovery_from_panes(parse_tmux_panes(&output.stdout)),
+        Ok(output) => SessionDiscovery {
+            available: true,
+            panes: Vec::new(),
+            sessions: Vec::new(),
+            error: Some(if output.timed_out {
                 "tmux list-panes timed out".to_string()
             } else {
-                // "no server running" means tmux is installed but idle; that is not an
-                // error for coverage purposes.
-                "no tmux server/session is running".to_string()
-            };
-            SessionDiscovery {
-                available: true,
-                panes: Vec::new(),
-                sessions: Vec::new(),
-                error: Some(message),
-            }
-        }
+                "no tmux server is visible to the service user (tmux sessions are per-user)"
+                    .to_string()
+            }),
+        },
         Err(err) => SessionDiscovery {
             available: false,
             panes: Vec::new(),
@@ -103,6 +160,69 @@ pub fn discover_tmux() -> SessionDiscovery {
             error: Some(err.to_string()),
         },
     }
+}
+
+fn discovery_from_panes(panes: Vec<PaneBinding>) -> SessionDiscovery {
+    let mut sessions: Vec<String> = panes.iter().map(|pane| pane.session_name.clone()).collect();
+    sessions.sort();
+    sessions.dedup();
+    SessionDiscovery {
+        available: true,
+        panes,
+        sessions,
+        error: None,
+    }
+}
+
+#[cfg(unix)]
+fn tmux_socket_args(socket: &Path, format: &str) -> Vec<String> {
+    vec![
+        "-S".to_string(),
+        socket.to_string_lossy().into_owned(),
+        "list-panes".to_string(),
+        "-a".to_string(),
+        "-F".to_string(),
+        format.to_string(),
+    ]
+}
+
+#[cfg(unix)]
+fn tmux_socket_paths() -> Vec<PathBuf> {
+    socket_paths_in(Path::new("/tmp"))
+}
+
+/// Bounded scan of `/tmp/tmux-<uid>/*` socket files.
+#[cfg(unix)]
+fn socket_paths_in(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut directories: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("tmux-"))
+        .map(|entry| entry.path())
+        .collect();
+    directories.sort();
+    directories.truncate(64);
+
+    let mut sockets = Vec::new();
+    for directory in directories {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok).take(32) {
+            let is_socket = entry
+                .file_type()
+                .is_ok_and(|file_type| file_type.is_socket());
+            if is_socket {
+                sockets.push(entry.path());
+                if sockets.len() >= 128 {
+                    return sockets;
+                }
+            }
+        }
+    }
+    sockets
 }
 
 /// Parse `tmux list-panes -F` tab-separated output.
@@ -193,6 +313,27 @@ mod tests {
         let mut sessions: Vec<String> = panes.iter().map(|p| p.session_name.clone()).collect();
         sessions.dedup();
         assert_eq!(sessions, vec!["main".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_per_user_tmux_sockets() {
+        use std::os::unix::net::UnixListener;
+
+        let root = std::env::temp_dir().join(format!(
+            "sarf-tmux-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        let tmux_dir = root.join("tmux-1000");
+        std::fs::create_dir_all(&tmux_dir).expect("tmux dir");
+        let _listener = UnixListener::bind(tmux_dir.join("default")).expect("socket");
+        let sockets = socket_paths_in(&root);
+        assert_eq!(sockets.len(), 1);
+        assert!(sockets[0].ends_with("tmux-1000/default"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

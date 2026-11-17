@@ -1313,7 +1313,12 @@ fn enrich(
         if tmux.available && !tmux.panes.is_empty() {
             health.success("tmux", stamps.wall);
         } else if tmux.available {
-            health.unavailable("tmux", "tmux installed but no server/session is running");
+            health.unavailable(
+                "tmux",
+                tmux.error
+                    .as_deref()
+                    .unwrap_or("tmux installed but no visible session is running"),
+            );
         } else {
             health.unavailable("tmux", "tmux not installed");
         }

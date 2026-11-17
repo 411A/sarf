@@ -45,8 +45,43 @@ pub fn run_bounded(
     timeout: Duration,
     max_bytes: usize,
 ) -> Result<CommandOutput> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command.args(args);
+    run_bounded_command(command, program, timeout, max_bytes)
+}
+
+/// Run a command with a hard wall-clock/output bound as another Unix uid/gid.
+///
+/// Used for per-user tmux sockets: the service is root, but the tmux client runs
+/// as the socket owner so a malformed socket cannot exercise root privileges.
+#[cfg(unix)]
+pub fn run_bounded_as(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+    max_bytes: usize,
+    uid: u32,
+    gid: u32,
+) -> Result<CommandOutput> {
+    use std::os::unix::process::CommandExt as _;
+
+    let mut command = Command::new(program);
+    command
         .args(args)
+        .uid(uid)
+        .gid(gid)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    run_bounded_command(command, program, timeout, max_bytes)
+}
+
+fn run_bounded_command(
+    mut command: Command,
+    program: &str,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<CommandOutput> {
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
