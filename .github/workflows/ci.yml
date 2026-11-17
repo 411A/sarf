@@ -20,6 +20,7 @@ jobs:
   linux:
     name: Linux (glibc)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,31 +42,31 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build all targets
-        run: cargo build --all-targets
+        run: cargo build --locked --all-targets
 
       - name: Unit tests
-        run: cargo test --lib
+        run: cargo test --locked --lib
 
       - name: Policy tests
-        run: cargo test --test policy
+        run: cargo test --locked --test policy
 
       - name: Plan conformance tests
-        run: cargo test --test plan_conformance
+        run: cargo test --locked --test plan_conformance
 
       - name: Collector integration tests
-        run: cargo test --test integration_collectors
+        run: cargo test --locked --test integration_collectors
 
       - name: Report integration tests
-        run: cargo test --test integration_report
+        run: cargo test --locked --test integration_report
 
       - name: End-to-end tests
-        run: cargo test --test e2e
+        run: cargo test --locked --test e2e
 
       - name: Performance tests (release)
-        run: cargo test --release --test perf -- --nocapture
+        run: cargo test --release --locked --test perf -- --nocapture
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -86,8 +87,9 @@ jobs:
           if-no-files-found: ignore
 
   linux-musl:
-    name: Linux (musl)
+    name: Linux (static musl, dist profile)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: false
     steps:
       - name: Checkout
@@ -106,21 +108,32 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: musl
+          key: musl-dist
 
-      - name: Build release binary (musl)
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Build static binary (dist profile)
+        env:
+          CC: musl-gcc
+          RUSTFLAGS: "-C linker=musl-gcc"
+        run: cargo build --locked --profile dist --target x86_64-unknown-linux-musl
+
+      - name: Smoke test and size report
+        run: |
+          bin=target/x86_64-unknown-linux-musl/dist/sarf
+          "$bin" --version
+          file "$bin"
+          stat -c 'size=%s bytes' "$bin"
 
       - name: Upload musl binary
         uses: actions/upload-artifact@v4
         with:
           name: sarf-linux-x86_64-musl
-          path: target/x86_64-unknown-linux-musl/release/sarf
+          path: target/x86_64-unknown-linux-musl/dist/sarf
           if-no-files-found: error
 
   windows:
     name: Windows (MSVC)
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -141,19 +154,19 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Unit tests
-        run: cargo test --lib
+        run: cargo test --locked --lib
 
       - name: Policy tests
-        run: cargo test --test policy
+        run: cargo test --locked --test policy
 
       - name: Plan conformance tests
-        run: cargo test --test plan_conformance
+        run: cargo test --locked --test plan_conformance
 
       - name: Collector integration tests
-        run: cargo test --test integration_collectors
+        run: cargo test --locked --test integration_collectors
 
       - name: Report integration tests
-        run: cargo test --test integration_report
+        run: cargo test --locked --test integration_report

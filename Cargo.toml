@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 description = "SARF — lightweight Linux process, service and activity forensics"
 license = "MIT"
-repository = "https://example.invalid/sarf"
+repository = "https://github.com/411A/sarf"
 readme = "README.md"
 keywords = ["linux", "monitoring", "forensics", "procfs", "cgroups"]
 categories = ["command-line-utilities", "os::linux-apis"]
@@ -73,6 +73,17 @@ items_after_statements = "allow"
 [profile.release]
 opt-level = 3
 lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Distribution profile used by the GitHub release workflow. It trades extra build
+# time for the smallest practical static binary; normal `--release` keeps the
+# faster thin-LTO profile used by the test/perf pyramid.
+[profile.dist]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"

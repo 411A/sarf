@@ -44,10 +44,10 @@ as complete.
 | §14 | Self-contained HTML, four views, Canvas/SVG, CSP | `src/report/mod.rs` + assets | template/report/e2e tests |
 | §15 | CLI | `src/cli.rs`, `src/commands/*` | plan conformance + e2e |
 | §16 | Example configuration | `config/defaults.toml` | default parse/validate test |
-| §17 | systemd unit, privilege model | `deploy/sarf.service`, `scripts/install.sh` | plan conformance; runtime requires a Linux host |
+| §17 | systemd unit, privilege model | `deploy/sarf.service`, `src/commands/install.rs`, embedded `scripts/install.sh` | plan conformance; runtime requires a Linux host |
 | §18 | Privacy, read-only, failure safety | defaults, redaction, policy tests | `tests/policy.rs` |
 | §19 | Coverage/loss/degradation | health registry, gaps, writer drops | status/gaps/report coverage |
-| §21 | Test pyramid | `tests/*`, scripts, CI | verify scripts + Docker API mock/live validation |
+| §21 | Test pyramid and release pipeline | `tests/*`, `scripts/verify.*`, `.github/workflows/{ci,release}.yml` | CI pyramid + static musl release assets with checksums |
 | §22 | Roadmap phases | see below | — |
 | §23 | Ponytail/SOLID discipline | no speculative framework; small modules; ADRs | review |
 

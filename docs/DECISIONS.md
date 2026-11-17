@@ -93,9 +93,11 @@ bounded `docker ps`/`docker logs` calls, which misses lifecycle events and is sl
 - The bounded CLI (`docker ps`/`docker logs`) remains a fallback when the socket is
   absent/denied or on non-Unix development hosts.
 - `/var/lib/docker/**/*-json.log` is never read directly (daemon-managed, root-only).
-- Socket access is opt-in: `scripts/install.sh --docker-group` adds the service user
-  to the `docker` group and `SupplementaryGroups=docker` to the unit, with a
-  root-equivalent warning. Default deployment keeps baseline accounting without it.
+- Socket access is opt-in: `sarf install --docker-group --start` adds the service
+  user to the `docker` group and `SupplementaryGroups=docker` to the unit, with a
+  root-equivalent warning. The command is idempotent and reuses the embedded
+  installer, so upgrades do not need manual `usermod`/`sed` steps. Default
+  deployment keeps baseline accounting without it.
 - tmux: `list-panes -a -F` with stable pane ids and pane PIDs.
 - Zellij: `list-sessions --short` for session-level detection only.
 - systemd units: inferred from cgroup path; no D-Bus.
@@ -295,3 +297,39 @@ with an upgrade message.
 **Upgrade path.** Add per-interface detail, per-container rates at sample resolution,
 or flow-level data only if a real query needs them; any such change requires a new
 additive migration and bounded storage review.
+
+## ADR-019 — Static release binaries with a self-installing command
+
+**Context.** Installing from source required a checkout, a Rust toolchain, a release
+build, `scripts/install.sh`, and manual `usermod`/`sed`/`systemctl` steps to enable
+Docker metadata on an existing install. CI built artifacts but did not publish a
+portable release, so the VPS workflow was much larger than "download one binary".
+
+**Decision.**
+- Add a `dist` Cargo profile (`opt-level = "z"`, fat LTO, stripped, aborting panics)
+  for the published artifact; the normal `release` profile stays tuned for the
+  test/perf pyramid.
+- `.github/workflows/release.yml` runs on `v*` tags (and manual dispatch), builds
+  static musl binaries for `x86_64-unknown-linux-musl` and
+  `aarch64-unknown-linux-musl`, verifies static linkage and `--version`, enforces a
+  20 MiB ceiling, and publishes the binaries plus `SHA256SUMS` to the GitHub
+  Release. Public repositories also get a build-provenance attestation. The tag must
+  match `Cargo.toml`.
+- Embed `scripts/install.sh` and `deploy/sarf.service` in the binary and expose
+  `sarf install` as an idempotent root command. It installs/updates the binary,
+  service user, data directory, configuration, unit and optional Docker group in one
+  invocation. `--start` enables and starts the unit.
+- Keep `scripts/install.sh` as the source of truth for installer logic (the binary
+  feeds it through stdin) instead of duplicating the account/unit/bash rules in Rust.
+  Add a `--unit` argument so the embedded unit can be passed without a repository.
+
+**Consequences.** A release install is download + `sudo ./sarf install
+--docker-group --start`; upgrades use the same command and preserve `/var/lib/sarf`.
+No glibc/libsqlite3 dependency is required on the VPS. `sarf install` remains
+Linux-only and root-only; the docker group is still explicitly root-equivalent.
+Embedding the installer adds a small amount of binary size, and the ARM release
+depends on a GitHub-hosted ARM runner.
+
+**Upgrade path.** Add signed artifacts (`cosign`/minisign) and `.deb`/RPM packaging if
+operators need repository-managed updates; keep the self-install path as the
+zero-dependency fallback.

@@ -25,20 +25,54 @@ HTML report. There is no web server, no cloud dependency and no permanent UI pro
 The universal baseline never depends on an integration. If Docker or tmux is absent,
 process and cgroup accounting continues and the report says what was unavailable.
 
-## Install (one binary)
+## Install (one static binary)
+
+Download the static Linux binary, then let it install itself. No repository,
+installer script, build toolchain or manual `usermod`/`sed` steps are needed:
 
 ```bash
-cargo build --release
-sudo ./scripts/install.sh --binary target/release/sarf --start
-sarf doctor
+# x86_64 one-liner (use the aarch64 asset on ARM64)
+curl -fsSL -o sarf \
+  https://github.com/411A/sarf/releases/latest/download/sarf-x86_64-unknown-linux-musl \
+  && chmod +x sarf \
+  && sudo ./sarf install --docker-group --start
+sudo sarf doctor
 ```
 
-Add `--docker-group` to the installer only if you want full Docker metadata,
-events and logs. Docker group membership is root-equivalent; the default install
-keeps baseline accounting without Docker socket access.
+Or step by step, if you prefer to inspect the binary first:
 
-The installer creates a system user, `/var/lib/sarf`, a hardened systemd unit and the
-default configuration. For a manual install, put the binary anywhere and run:
+```bash
+curl -fsSL -o sarf \
+  https://github.com/411A/sarf/releases/latest/download/sarf-x86_64-unknown-linux-musl
+chmod +x sarf
+sudo ./sarf install --docker-group --start
+sudo sarf doctor
+```
+
+On ARM64, replace `x86_64` with `aarch64` in the asset name. The release assets are
+static musl binaries, with `SHA256SUMS` attached to each release.
+
+`sarf install` is idempotent and is also the upgrade path: download the new binary
+and run the same command. It creates the `sarf` system user, `/var/lib/sarf`, the
+configuration and the hardened systemd unit, and enables/starts the service.
+
+- Omit `--docker-group` if you do not need full Docker metadata, events and logs.
+  Docker group membership is root-equivalent; baseline accounting works without it.
+- Omit `--start` to install the unit without starting it.
+- Use `--prefix PATH`, `--user NAME`, `--data-dir PATH` or `--no-systemd` for
+  non-default layouts. Run `sarf install --help` for the full list.
+
+For a build from source, the same command works from the repository binary:
+
+```bash
+cargo build --profile dist
+sudo ./target/dist/sarf install --docker-group --start
+```
+
+`scripts/install.sh` remains available for automation, but it is no longer required
+for a release install. Release/tagging details are in `docs/RELEASING.md`.
+
+For a foreground run without installing a service:
 
 ```bash
 sarf init                 # creates ./sarf-data next to the binary/workdir
@@ -53,7 +87,9 @@ Data-directory precedence:
 4. `./sarf-data`
 
 Everything SARF owns lives there: `sarf.toml`, `sarf.db` (+ WAL/SHM), `reports/` and
-`sarf.log`. The directory is `0750` and the database is owner-only on Unix.
+`sarf.log`. The directory is `0750` and the database is owner-only on Unix. The
+system installer defaults to `/var/lib/sarf`; `--data-dir` or `SARF_DATA_DIR`
+overrides that for service installs.
 
 ## Quickstart
 
@@ -139,7 +175,8 @@ All commands accept global `--data-dir`, `--config` and `--json`.
   namespace), need no Stats API call, and are rolled up with the cgroup sample.
   Host-mode and shared-netns containers are documented caveats, not silent guesses.
   The Docker socket is root-equivalent, so access is opt-in
-  (`scripts/install.sh --docker-group`). The systemd unit never depends on Docker.
+  (`sarf install --docker-group --start`). The systemd unit never depends on
+  Docker.
 
 ## Current limitations (v0.1)
 
@@ -168,7 +205,7 @@ src/report/      bounded data assembly + self-contained HTML assets
 src/daemon.rs    sampling loop, adaptive incidents, discovery cadence
 src/commands/    CLI formatting only
 tests/           policy, plan, integration, e2e, perf + fixtures
-docs/            ADRs, Docker design, testing, spec traceability
+docs/            ADRs, Docker design, testing, releases, spec traceability
 deploy/ scripts/ systemd unit, installer, verification scripts
 ```
 

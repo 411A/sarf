@@ -13,6 +13,7 @@
 #   --prefix PATH     Install prefix (default: /usr/local)
 #   --data-dir PATH   Data/config directory (default: /var/lib/sarf)
 #   --user NAME       Service user and group (default: sarf)
+#   --unit PATH       systemd unit template (default: <repo>/deploy/sarf.service)
 #   --no-systemd      Do not install or reload the systemd unit
 #   --start           Enable and start the unit now (requires systemd)
 #   --docker-group    Add the service user to the docker group (root-equivalent)
@@ -43,6 +44,7 @@ DATA_DIR=/var/lib/sarf
 RUN_USER=sarf
 RUN_GROUP=sarf
 BINARY="$REPO_ROOT/target/release/sarf"
+UNIT_SRC="$REPO_ROOT/deploy/sarf.service"
 INSTALL_SYSTEMD=1
 START=0
 JOIN_DOCKER_GROUP=0
@@ -58,6 +60,7 @@ Options:
   --prefix PATH     Install prefix (default: /usr/local)
   --data-dir PATH   Data/config directory (default: /var/lib/sarf)
   --user NAME       Service user and group (default: sarf)
+  --unit PATH       systemd unit template (default: <repo>/deploy/sarf.service)
   --no-systemd      Do not install or reload the systemd unit
   --start           Enable and start the unit now (requires systemd)
   --docker-group    Add the service user to the docker group (root-equivalent)
@@ -116,12 +119,25 @@ while [ "$#" -gt 0 ]; do
             RUN_GROUP=$RUN_USER
             shift
             ;;
+        --unit)
+            [ "$#" -ge 2 ] || die "--unit needs a path"
+            UNIT_SRC=$2
+            shift 2
+            ;;
+        --unit=*)
+            UNIT_SRC=${1#*=}
+            shift
+            ;;
         --no-systemd)
             INSTALL_SYSTEMD=0
             shift
             ;;
         --start)
             START=1
+            shift
+            ;;
+        --docker-group)
+            JOIN_DOCKER_GROUP=1
             shift
             ;;
         -h|--help)
@@ -234,7 +250,6 @@ esac
 [ ! -L "$DATA_DIR" ] || die "data directory must not be a symlink: $DATA_DIR"
 
 if [ "$INSTALL_SYSTEMD" -eq 1 ]; then
-    UNIT_SRC="$REPO_ROOT/deploy/sarf.service"
     [ -f "$UNIT_SRC" ] || die "systemd unit not found: $UNIT_SRC"
 fi
 
@@ -419,6 +434,6 @@ else
     printf '  service:  not installed\n'
 fi
 
-printf '\nVerify the installation:\n'
-printf '  "%s" doctor --data-dir "%s"\n' "$BIN_DEST" "$DATA_DIR"
-printf '  "%s" status --data-dir "%s"\n' "$BIN_DEST" "$DATA_DIR"
+printf '\nVerify the installation (the data directory is private to %s):\n' "$RUN_USER"
+printf '  sudo "%s" doctor --data-dir "%s"\n' "$BIN_DEST" "$DATA_DIR"
+printf '  sudo "%s" status --data-dir "%s"\n' "$BIN_DEST" "$DATA_DIR"

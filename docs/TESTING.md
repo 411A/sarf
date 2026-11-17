@@ -104,6 +104,14 @@ host, not claims.
 - The fixture e2e config disables Docker so replay is deterministic and never reads
   the host daemon; Docker is validated by the dedicated API/live tests instead.
 
+## Release artifacts
+
+`.github/workflows/release.yml` builds the `dist` profile for
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`. It verifies that each
+binary is statically linked, runs `--version`, enforces a 20 MiB ceiling, publishes
+`SHA256SUMS`, and (for public repositories) a build-provenance attestation. The tag
+must match `Cargo.toml`. See `docs/RELEASING.md`.
+
 ## Recorded measurements (2026-11-16, development host)
 
 Windows 11, Rust 1.98.1, release profile, fixture-driven perf test:

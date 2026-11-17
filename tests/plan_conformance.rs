@@ -25,6 +25,9 @@ fn read(relative: &str) -> String {
 fn every_documented_command_parses() {
     let invocations: &[&[&str]] = &[
         &["sarf", "init"],
+        &["sarf", "install"],
+        &["sarf", "install", "--docker-group", "--start"],
+        &["sarf", "install", "--no-systemd"],
         &["sarf", "run"],
         &["sarf", "run", "--cycles", "3", "--interval-secs", "5"],
         &["sarf", "run", "--fixture-root", "fixture"],
@@ -161,6 +164,8 @@ fn release_and_operations_artifacts_exist() {
         "scripts/verify.ps1",
         "Dockerfile",
         ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+        "docs/RELEASING.md",
         "config/defaults.toml",
         "examples/demo_report.rs",
     ] {
@@ -168,6 +173,12 @@ fn release_and_operations_artifacts_exist() {
     }
     let service = read("deploy/sarf.service");
     assert!(service.contains("ExecStart=/usr/local/bin/sarf run"));
+    let installer = read("scripts/install.sh");
+    assert!(
+        installer.contains("--docker-group)"),
+        "installer must parse --docker-group"
+    );
+    assert!(installer.contains("--unit)"));
     assert!(service.contains("NoNewPrivileges=yes"));
     assert!(service.contains("ReadWritePaths="));
     assert!(!service.contains("Requires=docker"));

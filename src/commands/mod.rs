@@ -5,6 +5,7 @@
 //! `--json` mirrors the same data for scripts.
 
 pub mod export;
+pub mod install;
 pub mod query;
 pub mod system;
 
@@ -254,9 +255,15 @@ pub fn parse_timestamp(text: &str) -> Option<i64> {
 /// Parse the CLI and run one command.
 pub fn main() -> Result<i32> {
     let cli = Cli::parse();
+    // Install must work before any existing data directory/config is valid: the
+    // command creates both. Every other command needs the shared context.
+    if let Command::Install(args) = &cli.command {
+        return install::install(args, cli.data_dir.as_deref());
+    }
     let mut context = Context::new(&cli)?;
     match &cli.command {
         Command::Init { force } => system::init(&mut context, *force),
+        Command::Install(_) => unreachable!("install is dispatched before context creation"),
         Command::Run(args) => system::run_daemon(&context, args),
         Command::Doctor => system::doctor(&context),
         Command::Status => system::status(&context),

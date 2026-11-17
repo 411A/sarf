@@ -84,11 +84,13 @@ SARF never grants it automatically. Options:
    Docker metadata/events/logs are marked unavailable (never zero).
 2. Opt in for full Docker observation:
    ```bash
-   ./scripts/install.sh --docker-group
+   sudo sarf install --docker-group --start
    ```
    This adds the service user to the `docker` group and adds
-   `SupplementaryGroups=docker` to the installed unit. Remove the membership if
-   the security trade-off is not acceptable.
+   `SupplementaryGroups=docker` to the installed unit. The same idempotent command
+   updates an existing install, so the old manual `usermod` + `sed` + `systemctl`
+   sequence is no longer needed. Remove the membership if the security trade-off is
+   not acceptable.
 3. Rootless Docker: run SARF as the owning user and point `DOCKER_HOST` at that
    user’s socket (`unix:///run/user/<uid>/docker.sock`), or grant an equivalent
    read-only proxy. TCP Docker endpoints are intentionally not used.

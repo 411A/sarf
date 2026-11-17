@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// SARF — Service Activity Recorder & Forensics.
 #[derive(Debug, Parser)]
@@ -42,6 +42,8 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Install or update the system-wide service from this binary (Linux, root).
+    Install(InstallArgs),
     /// Run the collection daemon.
     Run(RunArgs),
     /// Check kernel, /proc, cgroup, permissions, database and optional tools.
@@ -182,6 +184,26 @@ pub enum Command {
         #[command(subcommand)]
         command: ToolsCommand,
     },
+}
+
+/// Arguments for `sarf install`.
+#[derive(Debug, Clone, Args)]
+pub struct InstallArgs {
+    /// Install prefix for the binary (default: /usr/local).
+    #[arg(long, default_value = "/usr/local", value_name = "PATH")]
+    pub prefix: PathBuf,
+    /// Service user and group (default: sarf).
+    #[arg(long, default_value = "sarf", value_name = "NAME")]
+    pub user: String,
+    /// Add the service user to the docker group (root-equivalent).
+    #[arg(long)]
+    pub docker_group: bool,
+    /// Enable and start the systemd unit after installing it.
+    #[arg(long)]
+    pub start: bool,
+    /// Do not install or reload a systemd unit.
+    #[arg(long)]
+    pub no_systemd: bool,
 }
 
 /// Daemon arguments.

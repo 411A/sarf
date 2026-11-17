@@ -49,7 +49,7 @@ ARG SARF_VERSION=0.1.0
 
 LABEL org.opencontainers.image.title="SARF" \
       org.opencontainers.image.description="Lightweight Linux process, service and activity forensics" \
-      org.opencontainers.image.source="https://example.invalid/sarf" \
+      org.opencontainers.image.source="https://github.com/411A/sarf" \
       org.opencontainers.image.version="${SARF_VERSION}" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.base.name="docker.io/library/debian:bookworm-slim"

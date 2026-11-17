@@ -1,6 +1,6 @@
 [Unit]
 Description=SARF service activity recorder
-Documentation=https://example.invalid/sarf
+Documentation=https://github.com/411A/sarf
 After=local-fs.target
 # Deliberately no Wants=/After=network-online.target: SARF records local
 # activity and never contacts the network, so it must also start on isolated or
@@ -11,8 +11,8 @@ After=local-fs.target
 # process accounting works without Docker access; the Engine API/CLI adapters
 # degrade to "unavailable" (never zero activity) unless the operator explicitly
 # grants socket access. Docker group membership is root-equivalent; opt in with
-# `scripts/install.sh --docker-group` (adds SupplementaryGroups=docker) only if
-# full container metadata, events and logs are required.
+# `sarf install --docker-group --start` (adds SupplementaryGroups=docker) only
+# if full container metadata, events and logs are required.
 
 [Service]
 Type=simple
