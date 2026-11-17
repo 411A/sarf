@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -72,7 +72,7 @@ jobs:
         run: cargo build --release --locked
 
       - name: Upload Linux binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sarf-linux-x86_64
           path: target/release/sarf
@@ -80,7 +80,7 @@ jobs:
 
       - name: Upload e2e reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sarf-e2e-reports
           path: sarf-data/reports/*.html
@@ -93,7 +93,7 @@ jobs:
     continue-on-error: false
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install musl toolchain
         run: |
@@ -124,7 +124,7 @@ jobs:
           stat -c 'size=%s bytes' "$bin"
 
       - name: Upload musl binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sarf-linux-x86_64-musl
           path: target/x86_64-unknown-linux-musl/dist/sarf
@@ -136,7 +136,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.100.0
