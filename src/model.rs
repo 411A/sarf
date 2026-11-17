@@ -477,6 +477,22 @@ pub struct CgroupSample {
     pub cpu_period_usec: Option<u64>,
     /// `pids.current`.
     pub pids_current: Option<u64>,
+    /// Network receive bytes in the container network namespace (cumulative).
+    pub net_rx_bytes: Option<u64>,
+    /// Network transmit bytes in the container network namespace (cumulative).
+    pub net_tx_bytes: Option<u64>,
+    /// Network receive packets.
+    pub net_rx_packets: Option<u64>,
+    /// Network transmit packets.
+    pub net_tx_packets: Option<u64>,
+    /// Network receive errors.
+    pub net_rx_errors: Option<u64>,
+    /// Network transmit errors.
+    pub net_tx_errors: Option<u64>,
+    /// Network receive drops.
+    pub net_rx_dropped: Option<u64>,
+    /// Network transmit drops.
+    pub net_tx_dropped: Option<u64>,
     /// `cpu.pressure`.
     pub psi_cpu: Option<PressureLine>,
     /// `memory.pressure`.

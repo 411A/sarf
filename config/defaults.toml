@@ -39,7 +39,7 @@ max_cgroups = 512
 
 [network]
 interface_counters = true
-# Per-container network counters from runtime metadata (when available).
+# Per-container counters from /proc/<pid>/net/dev (host-mode containers skipped).
 container_counters = true
 
 [logs]

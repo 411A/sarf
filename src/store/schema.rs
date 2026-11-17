@@ -10,7 +10,7 @@
 //! and tested against a fresh database and against an existing one.
 
 /// Current schema version. Increment when adding a migration.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Version-1 schema.
 pub const MIGRATION_1: &str = r"
@@ -315,6 +315,23 @@ CREATE TABLE IF NOT EXISTS coverage_gaps (
 CREATE INDEX IF NOT EXISTS coverage_gaps_open ON coverage_gaps(resolved_wall_ns);
 ";
 
+/// Version-2 migration: per-container network counters on cgroup samples.
+///
+/// Network counters come from `/proc/<container-pid>/net/dev` (the container's
+/// network namespace) and are stored on the cgroup sample for the same entity. This
+/// keeps service/container accounting in one table and lets the existing 1-minute
+/// rollups carry network bytes without a second time-series table.
+pub const MIGRATION_2: &str = r"
+ALTER TABLE cgroup_samples ADD COLUMN net_rx_bytes INTEGER;
+ALTER TABLE cgroup_samples ADD COLUMN net_tx_bytes INTEGER;
+ALTER TABLE cgroup_samples ADD COLUMN net_rx_packets INTEGER;
+ALTER TABLE cgroup_samples ADD COLUMN net_tx_packets INTEGER;
+ALTER TABLE cgroup_samples ADD COLUMN net_rx_errors INTEGER;
+ALTER TABLE cgroup_samples ADD COLUMN net_tx_errors INTEGER;
+ALTER TABLE cgroup_samples ADD COLUMN net_rx_dropped INTEGER;
+ALTER TABLE cgroup_samples ADD COLUMN net_tx_dropped INTEGER;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +372,24 @@ mod tests {
         // persist a sample before its entity row in the same batch, and SQLite would
         // reject it. Referential intent is documented and validated by query tests.
         assert!(!MIGRATION_1.contains("REFERENCES"));
+    }
+
+    #[test]
+    fn migration_two_adds_container_network_columns() {
+        for column in [
+            "net_rx_bytes",
+            "net_tx_bytes",
+            "net_rx_packets",
+            "net_tx_packets",
+            "net_rx_errors",
+            "net_tx_errors",
+            "net_rx_dropped",
+            "net_tx_dropped",
+        ] {
+            assert!(MIGRATION_2.contains(column), "missing {column}");
+        }
+        assert!(!MIGRATION_2.contains("REFERENCES"));
+        assert_eq!(SCHEMA_VERSION, 2);
     }
 
     #[test]

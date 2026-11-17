@@ -258,3 +258,40 @@ portable standard-library code and does not reset `SIGPIPE` via `unsafe`.
 **Consequences.** Piped output terminates quietly and the daemon/collection logic is
 unaffected (it does not write tables). A real panic still prints normally and exits
 non-zero.
+
+## ADR-018 — Per-container network from the container network namespace
+
+**Context.** Docker container CPU/memory/I/O/PID accounting already comes from cgroup
+v2. Network byte counters were still only available host-wide. The Docker Stats API can
+return per-container counters, but `stream=false` costs roughly one second per
+container (measured), which is unacceptable for a 30-second cadence with many
+containers. Reading `/var/lib/docker` is root-only and daemon-managed.
+
+**Decision.**
+- Read `/proc/<container-pid>/net/dev` for every running container with a PID. That
+  file is the container's network namespace, so its cumulative counters are
+  container-scoped. Exclude `lo` and sum the remaining interfaces.
+- Store the raw counters (bytes, packets, errors, drops for RX/TX) on the container's
+  existing `cgroup_samples` row. Additive schema migration v2 adds the columns; the
+  existing 1-minute cgroup rollup persists RX/TX byte deltas in
+  `rollup_1m.net_rx_bytes/net_tx_bytes`.
+- Do not call the Docker Stats API and do not poll per-container stats. One procfs read
+  per container per cycle is the whole cost.
+- Skip `network_mode=host` containers: their namespace counters are host-wide. Report
+  containers sharing a network namespace as shared counters; do not attempt to split
+  them.
+- Missing PID, stopped container, unreadable procfs or a container without a network
+  namespace leaves counters `NULL` ("unavailable"), never `0`.
+- Network high/low attribution windows use host network rates and rank containers by
+  accumulated bytes in the run; wording stays observational.
+
+**Consequences.** Bounded overhead and no new dependency. Network is available with
+the same permissions as the rest of `/proc`; if another user's `/proc/<pid>` tree is
+hidden, counters are unavailable while baseline accounting continues. Shared
+namespaces and host-mode containers are explicit boundaries in reports and docs. The
+schema change is additive and forward-only; older SARF builds refuse a v2 database
+with an upgrade message.
+
+**Upgrade path.** Add per-interface detail, per-container rates at sample resolution,
+or flow-level data only if a real query needs them; any such change requires a new
+additive migration and bounded storage review.

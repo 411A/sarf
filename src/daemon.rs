@@ -31,8 +31,8 @@ use crate::enrich::docker_api;
 use crate::enrich::sessions::{self, SessionDiscovery};
 use crate::error::{Error, Result};
 use crate::model::{
-    Availability, ConfiguredState, CoverageGap, Entity, EntityKind, HostSample, Metric, Severity,
-    WritePriority,
+    Availability, ConfiguredState, CoverageGap, Entity, EntityKind, HostSample, Metric,
+    NetCounters, Severity, WritePriority,
 };
 #[cfg(unix)]
 use crate::model::{EventKind, EventRecord};
@@ -476,7 +476,10 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         let mut batch: Vec<WriteItem> = Vec::new();
 
         let host_collector = HostCollector::new(root.clone());
-        let host = host_collector.sample(stamps.clone())?;
+        let mut host = host_collector.sample(stamps.clone())?;
+        if !options.config.network.interface_counters {
+            host.net.clear();
+        }
         let cpu_count = host.per_cpu.len().max(1);
         batch.push(WriteItem::normal(WriteRecord::HostSample(host.clone())));
         report.host_samples = report.host_samples.saturating_add(1);
@@ -542,6 +545,13 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
             {
                 Ok(mut cgroups) => {
                     apply_docker_labels(&mut cgroups, &enrichment.containers);
+                    if options.config.network.container_counters {
+                        apply_container_network(
+                            &mut cgroups,
+                            root.proc_root(),
+                            &enrichment.containers,
+                        );
+                    }
                     cgroup_map.clear();
                     for entity in &cgroups.entities {
                         cgroup_map.insert(
@@ -842,6 +852,62 @@ fn apply_docker_labels(cycle: &mut CgroupCycle, containers: &HashMap<String, Con
         }
     }
 }
+
+/// Read the container's network-namespace counters from the host procfs view.
+///
+/// `/proc/<container-pid>/net/dev` is the container network namespace, so this is a
+/// tiny read per container and needs no `docker stats` call. `network_mode=host`
+/// would report host-wide counters and is deliberately skipped.
+fn apply_container_network(
+    cycle: &mut CgroupCycle,
+    proc_root: &Path,
+    containers: &HashMap<String, ContainerInfo>,
+) {
+    for sample in &mut cycle.samples {
+        let Some(short) = catalog::container_from_cgroup(&sample.path) else {
+            continue;
+        };
+        let Some(container) = containers.get(&short) else {
+            continue;
+        };
+        if container.pid == 0
+            || container.network_mode.as_deref() == Some("host")
+            || sample.path.ends_with("/init.scope")
+        {
+            continue;
+        }
+        let path = proc_root.join(format!("{}/net/dev", container.pid));
+        let Some(text) = crate::collect::procfs::read_optional(&path) else {
+            continue;
+        };
+        let Ok(interfaces) = crate::collect::procfs::parse_net_dev(&text) else {
+            continue;
+        };
+        let mut total = NetCounters::default();
+        for (name, counters) in interfaces {
+            if name == "lo" {
+                continue;
+            }
+            total.rx_bytes = total.rx_bytes.saturating_add(counters.rx_bytes);
+            total.rx_packets = total.rx_packets.saturating_add(counters.rx_packets);
+            total.rx_errors = total.rx_errors.saturating_add(counters.rx_errors);
+            total.rx_drops = total.rx_drops.saturating_add(counters.rx_drops);
+            total.tx_bytes = total.tx_bytes.saturating_add(counters.tx_bytes);
+            total.tx_packets = total.tx_packets.saturating_add(counters.tx_packets);
+            total.tx_errors = total.tx_errors.saturating_add(counters.tx_errors);
+            total.tx_drops = total.tx_drops.saturating_add(counters.tx_drops);
+        }
+        sample.net_rx_bytes = Some(total.rx_bytes);
+        sample.net_tx_bytes = Some(total.tx_bytes);
+        sample.net_rx_packets = Some(total.rx_packets);
+        sample.net_tx_packets = Some(total.tx_packets);
+        sample.net_rx_errors = Some(total.rx_errors);
+        sample.net_tx_errors = Some(total.tx_errors);
+        sample.net_rx_dropped = Some(total.rx_drops);
+        sample.net_tx_dropped = Some(total.tx_drops);
+    }
+}
+
 fn enqueue_process_cycle(
     batch: &mut Vec<WriteItem>,
     cycle: ProcessCycle,
@@ -1677,6 +1743,97 @@ mod tests {
         // 80 busy ticks of 100 total = 80% of all 8 cores = 12.5% of one core.
         let pct = host_cpu_pct(&before, &after, 8).expect("pct");
         assert!((pct - 640.0).abs() < 0.001, "pct {pct}");
+    }
+
+    fn container(short_id: &str, pid: u32, network_mode: Option<&str>) -> ContainerInfo {
+        ContainerInfo {
+            id: format!("{short_id}012345678901234567890123456789012345678901234567890123"),
+            short_id: short_id.to_string(),
+            name: "test".to_string(),
+            image: "image".to_string(),
+            state: "running".to_string(),
+            status: "Up".to_string(),
+            health: None,
+            labels: BTreeMap::new(),
+            log_driver: Some("json-file".to_string()),
+            log_options: BTreeMap::new(),
+            log_path: None,
+            tty: false,
+            restart_policy: None,
+            cgroup_parent: None,
+            pid,
+            created: None,
+            started_at: None,
+            finished_at: None,
+            networks: Vec::new(),
+            ports: Vec::new(),
+            mounts: Vec::new(),
+            hostname: None,
+            user: None,
+            working_dir: None,
+            restart_count: 0,
+            memory_limit: None,
+            nano_cpus: None,
+            pids_limit: None,
+            network_ips: Vec::new(),
+            network_mode: network_mode.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn container_network_sums_interfaces_and_skips_host_mode() {
+        let dir = std::env::temp_dir().join(format!("sarf-net-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("1234/net")).expect("net dir");
+        std::fs::write(
+            dir.join("1234/net/dev"),
+            "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n    lo: 999 9 0 0 0 0 0 0 888 8 0 0 0 0 0 0\n  eth0: 1000 10 1 2 0 0 0 0 2000 20 3 4 0 0 0 0\n  eth1: 500 5 0 0 0 0 0 0 600 6 0 0 0 0 0 0\n",
+        )
+        .expect("net dev");
+        let short = "abcdef012345";
+        let mut containers = HashMap::new();
+        containers.insert(short.to_string(), container(short, 1234, Some("bridge")));
+        let mut cycle = CgroupCycle {
+            samples: vec![crate::model::CgroupSample {
+                path: format!("/system.slice/docker-{short}.scope"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        apply_container_network(&mut cycle, &dir, &containers);
+        let sample = &cycle.samples[0];
+        assert_eq!(sample.net_rx_bytes, Some(1500));
+        assert_eq!(sample.net_tx_bytes, Some(2600));
+        assert_eq!(sample.net_rx_packets, Some(15));
+        assert_eq!(sample.net_tx_packets, Some(26));
+        assert_eq!(sample.net_rx_errors, Some(1));
+        assert_eq!(sample.net_tx_errors, Some(3));
+        assert_eq!(sample.net_rx_dropped, Some(2));
+        assert_eq!(sample.net_tx_dropped, Some(4));
+
+        containers.insert(short.to_string(), container(short, 1234, Some("host")));
+        let mut host_mode = CgroupCycle {
+            samples: vec![crate::model::CgroupSample {
+                path: format!("/system.slice/docker-{short}.scope"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        apply_container_network(&mut host_mode, &dir, &containers);
+        assert_eq!(host_mode.samples[0].net_rx_bytes, None);
+        assert_eq!(host_mode.samples[0].net_tx_bytes, None);
+
+        containers.insert(short.to_string(), container(short, 9999, Some("bridge")));
+        let mut missing = CgroupCycle {
+            samples: vec![crate::model::CgroupSample {
+                path: format!("/system.slice/docker-{short}.scope"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        apply_container_network(&mut missing, &dir, &containers);
+        assert_eq!(missing.samples[0].net_rx_bytes, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

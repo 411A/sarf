@@ -380,13 +380,19 @@ impl Store {
                 schema::SCHEMA_VERSION
             )));
         }
-        if version < 1 {
+        if version < schema::SCHEMA_VERSION {
             let tx = self
                 .conn
                 .transaction()
                 .map_err(|err| Error::Storage(format!("begin migration: {err}")))?;
-            tx.execute_batch(schema::MIGRATION_1)
-                .map_err(|err| Error::Storage(format!("apply schema v1: {err}")))?;
+            if version < 1 {
+                tx.execute_batch(schema::MIGRATION_1)
+                    .map_err(|err| Error::Storage(format!("apply schema v1: {err}")))?;
+            }
+            if version < 2 {
+                tx.execute_batch(schema::MIGRATION_2)
+                    .map_err(|err| Error::Storage(format!("apply schema v2: {err}")))?;
+            }
             tx.execute_batch(&format!(
                 "PRAGMA user_version = {};",
                 schema::SCHEMA_VERSION
@@ -627,8 +633,8 @@ impl Store {
                         .io
                         .and_then(|p| p.some_total_us)
                         .map(to_sql_i64),
-                    to_sql_i64(sum_net(&sample.net, |n| n.rx_bytes)),
-                    to_sql_i64(sum_net(&sample.net, |n| n.tx_bytes)),
+                    to_sql_opt_i64(sum_net(&sample.net, |n| n.rx_bytes)),
+                    to_sql_opt_i64(sum_net(&sample.net, |n| n.tx_bytes)),
                     to_sql_i64(sum_disk(&sample.disk, |d| d.read_bytes)),
                     to_sql_i64(sum_disk(&sample.disk, |d| d.write_bytes)),
                     sample.uptime_secs,
@@ -655,9 +661,12 @@ impl Store {
                         memory_current_bytes, memory_peak_bytes, memory_max_bytes,
                         memory_anon_bytes, memory_file_bytes, memory_swap_bytes,
                         cpu_quota_usec, cpu_period_usec, pids_current,
+                        net_rx_bytes, net_tx_bytes, net_rx_packets, net_tx_packets,
+                        net_rx_errors, net_tx_errors, net_rx_dropped, net_tx_dropped,
                         psi_cpu_some_avg10, psi_mem_some_avg10, psi_io_some_avg10, io_json)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                             ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                             ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
+                             ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
                 )
                 .map_err(map)?
                 .execute(params![
@@ -681,6 +690,14 @@ impl Store {
                     to_sql_opt_i64(sample.cpu_quota_usec),
                     to_sql_opt_i64(sample.cpu_period_usec),
                     to_sql_opt_i64(sample.pids_current),
+                    to_sql_opt_i64(sample.net_rx_bytes),
+                    to_sql_opt_i64(sample.net_tx_bytes),
+                    to_sql_opt_i64(sample.net_rx_packets),
+                    to_sql_opt_i64(sample.net_tx_packets),
+                    to_sql_opt_i64(sample.net_rx_errors),
+                    to_sql_opt_i64(sample.net_tx_errors),
+                    to_sql_opt_i64(sample.net_rx_dropped),
+                    to_sql_opt_i64(sample.net_tx_dropped),
                     sample.psi_cpu.and_then(|p| p.some_avg10),
                     sample.psi_memory.and_then(|p| p.some_avg10),
                     sample.psi_io.and_then(|p| p.some_avg10),
@@ -1000,8 +1017,11 @@ impl Store {
 fn sum_net(
     counters: &std::collections::BTreeMap<String, crate::model::NetCounters>,
     field: impl Fn(&crate::model::NetCounters) -> u64,
-) -> u64 {
-    counters.values().map(field).fold(0u64, u64::saturating_add)
+) -> Option<u64> {
+    if counters.is_empty() {
+        return None;
+    }
+    Some(counters.values().map(field).fold(0u64, u64::saturating_add))
 }
 
 fn sum_disk(
@@ -1070,7 +1090,45 @@ mod tests {
     #[test]
     fn migration_sets_version() {
         let store = store();
-        assert_eq!(store.schema_version().expect("version"), 1);
+        assert_eq!(store.schema_version().expect("version"), 2);
+    }
+
+    #[test]
+    fn version_one_database_gains_network_columns() {
+        let conn = Connection::open_in_memory().expect("in-memory connection");
+        conn.execute_batch(schema::MIGRATION_1).expect("v1 schema");
+        conn.execute_batch("PRAGMA user_version = 1;")
+            .expect("set v1");
+        let mut store = Store {
+            conn,
+            path: PathBuf::from(":memory:"),
+        };
+        store.migrate().expect("migrate");
+        assert_eq!(store.schema_version().expect("version"), 2);
+        let mut statement = store
+            .connection()
+            .prepare("PRAGMA table_info(cgroup_samples)")
+            .expect("table info");
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("rows")
+            .filter_map(Result::ok)
+            .collect();
+        for column in [
+            "net_rx_bytes",
+            "net_tx_bytes",
+            "net_rx_packets",
+            "net_tx_packets",
+            "net_rx_errors",
+            "net_tx_errors",
+            "net_rx_dropped",
+            "net_tx_dropped",
+        ] {
+            assert!(
+                columns.iter().any(|name| name == column),
+                "missing {column}"
+            );
+        }
     }
 
     #[test]
@@ -1420,7 +1478,7 @@ mod tests {
                 .expect("write");
         }
         let reopened = Store::open(&path).expect("reopen");
-        assert_eq!(reopened.schema_version().expect("version"), 1);
+        assert_eq!(reopened.schema_version().expect("version"), 2);
         assert_eq!(reopened.meta_get("k").expect("meta").as_deref(), Some("v"));
     }
 }

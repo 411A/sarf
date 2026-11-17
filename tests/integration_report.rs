@@ -183,6 +183,8 @@ fn seed() -> Seeded {
     let mut user = 0_u64;
     let mut idle = 0_u64;
     let mut nginx_usec = 0_u64;
+    let mut nginx_rx = 0_u64;
+    let mut nginx_tx = 0_u64;
     let mut process_ticks = 0_u64;
     let mut incident_start = base;
     for index in 0..=12_i64 {
@@ -223,6 +225,8 @@ fn seed() -> Seeded {
         })));
 
         nginx_usec += if spike { 30_000_000 } else { 1_000_000 };
+        nginx_rx += if spike { 8 * 1024 * 1024 } else { 64 * 1024 };
+        nginx_tx += if spike { 4 * 1024 * 1024 } else { 32 * 1024 };
         items.push(WriteItem::normal(WriteRecord::CgroupSample(CgroupSample {
             stamps: stamps(wall),
             entity_id: "cgroup:1:1".into(),
@@ -237,6 +241,8 @@ fn seed() -> Seeded {
             }),
             memory_max: Some(64 * 1024 * 1024),
             pids_current: Some(2),
+            net_rx_bytes: Some(nginx_rx),
+            net_tx_bytes: Some(nginx_tx),
             ..Default::default()
         })));
 
@@ -375,6 +381,14 @@ fn report_detects_high_cpu_and_names_contributors_with_evidence() {
 
     let top_cpu = &document.top.cpu;
     assert!(top_cpu.iter().any(|row| row.name.contains("nginx")));
+    let top_network = document
+        .top
+        .network
+        .iter()
+        .find(|row| row.name.contains("nginx"))
+        .expect("nginx network usage in the report");
+    assert!(top_network.net_rx_bytes.is_some_and(|bytes| bytes > 0));
+    assert!(top_network.net_tx_bytes.is_some_and(|bytes| bytes > 0));
     assert_eq!(document.containers.len(), 1);
     let container = &document.containers[0];
     assert_eq!(container.name, "demo-web");

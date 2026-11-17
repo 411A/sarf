@@ -77,6 +77,8 @@ pub struct ContainerInfo {
     pub pids_limit: Option<i64>,
     /// Per-network IP addresses (`network=ip`), bounded.
     pub network_ips: Vec<String>,
+    /// Docker network mode (`bridge`, `host`, `none`, container/service mode).
+    pub network_mode: Option<String>,
 }
 
 impl ContainerInfo {
@@ -202,6 +204,7 @@ pub fn parse_ps_output(text: &str) -> Vec<ContainerInfo> {
             nano_cpus: None,
             pids_limit: None,
             network_ips: Vec::new(),
+            network_mode: None,
         });
     }
     containers

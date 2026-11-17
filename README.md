@@ -134,10 +134,12 @@ All commands accept global `--data-dir`, `--config` and `--json`.
 - Read-only collection: SARF never writes to `/proc`, `/sys/fs/cgroup`, journals,
   Docker configuration, tmux/Zellij sessions or monitored services.
 - Docker uses the local Engine API for metadata, lifecycle events and bounded logs;
-  `docker ps`/`docker logs` CLI calls are only a fallback. Per-container network byte
-  counters are not yet a time series (host interface counters are). The Docker socket
-  is root-equivalent, so access is opt-in (`scripts/install.sh --docker-group`). The
-  systemd unit never depends on Docker.
+  `docker ps`/`docker logs` CLI calls are only a fallback. Per-container network
+  counters come from `/proc/<container-pid>/net/dev` (the container network
+  namespace), need no Stats API call, and are rolled up with the cgroup sample.
+  Host-mode and shared-netns containers are documented caveats, not silent guesses.
+  The Docker socket is root-equivalent, so access is opt-in
+  (`scripts/install.sh --docker-group`). The systemd unit never depends on Docker.
 
 ## Current limitations (v0.1)
 

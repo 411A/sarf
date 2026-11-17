@@ -301,6 +301,7 @@ struct Acc {
     io_write: u64,
     net_rx: u64,
     net_tx: u64,
+    net_seen: bool,
     psi_cpu_max: f64,
     psi_mem_max: f64,
     psi_io_max: f64,
@@ -324,6 +325,7 @@ impl Acc {
             io_write: 0,
             net_rx: 0,
             net_tx: 0,
+            net_seen: false,
             psi_cpu_max: 0.0,
             psi_mem_max: 0.0,
             psi_io_max: 0.0,
@@ -474,6 +476,9 @@ fn rollup_host(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Result<
             let slot = &mut accumulators[index];
             slot.add_interval(pct, cpu_usec);
             slot.add_memory(memory);
+            if current.net_rx.is_some() || current.net_tx.is_some() {
+                slot.net_seen = true;
+            }
             slot.net_rx = slot.net_rx.saturating_add(
                 current
                     .net_rx
@@ -552,6 +557,12 @@ impl HostRaw {
     }
 }
 
+/// Previous cgroup sample used to derive counter deltas.
+///
+/// Fields: entity id, cumulative CPU microseconds, I/O counters, cumulative
+/// network receive bytes, cumulative network transmit bytes.
+type CgroupRollupPrevious = (String, u64, Vec<CgroupIoRaw>, Option<u64>, Option<u64>);
+
 fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Result<u64> {
     let (start, end) = rollup_window(store, "rollup_1m_cgroup_through_ns", now, policy.raw_hours)?;
     if start >= end {
@@ -563,7 +574,8 @@ fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Resu
         let mut statement = conn
             .prepare(
                 "SELECT entity_id, wall_ts_ns, cpu_usage_usec, memory_current_bytes, io_json,
-                        psi_cpu_some_avg10, psi_mem_some_avg10, psi_io_some_avg10
+                        psi_cpu_some_avg10, psi_mem_some_avg10, psi_io_some_avg10,
+                        net_rx_bytes, net_tx_bytes
                    FROM cgroup_samples
                   WHERE wall_ts_ns >= ?1 AND wall_ts_ns < ?2
                   ORDER BY entity_id, mono_ts_ns",
@@ -572,7 +584,7 @@ fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Resu
         let mut rows = statement
             .query(params![start, end])
             .map_err(|err| Error::Storage(format!("rollup cgroup query: {err}")))?;
-        let mut previous: Option<(String, u64, Vec<CgroupIoRaw>)> = None;
+        let mut previous: Option<CgroupRollupPrevious> = None;
         while let Some(row) = rows
             .next()
             .map_err(|err| Error::Storage(format!("rollup cgroup row: {err}")))?
@@ -585,10 +597,25 @@ fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Resu
             let psi_cpu: Option<f64> = row.get(5).map_err(storage)?;
             let psi_mem: Option<f64> = row.get(6).map_err(storage)?;
             let psi_io: Option<f64> = row.get(7).map_err(storage)?;
+            let net_rx = row.opt_u64_at(8)?;
+            let net_tx = row.opt_u64_at(9)?;
             let io = parse_io(io_json.as_deref());
-            let current = (entity_id.clone(), cpu.unwrap_or(0), io.clone());
+            let current = (
+                entity_id.clone(),
+                cpu.unwrap_or(0),
+                io.clone(),
+                net_rx,
+                net_tx,
+            );
             let previous = previous.replace(current);
-            let Some((previous_entity, previous_cpu, previous_io)) = previous else {
+            let Some((
+                previous_entity,
+                previous_cpu,
+                previous_io,
+                previous_net_rx,
+                previous_net_tx,
+            )) = previous
+            else {
                 continue;
             };
             if previous_entity != entity_id {
@@ -615,6 +642,19 @@ fn rollup_cgroups(store: &mut Store, policy: &RetentionPolicy, now: i64) -> Resu
                         .saturating_add(delta_io(&previous_io, &io, |entry| entry.write_bytes));
                 slot.psi_cpu_max = slot.psi_cpu_max.max(psi_cpu.unwrap_or(0.0));
                 slot.psi_mem_max = slot.psi_mem_max.max(psi_mem.unwrap_or(0.0));
+                if net_rx.is_some() || net_tx.is_some() {
+                    slot.net_seen = true;
+                }
+                slot.net_rx = slot.net_rx.saturating_add(
+                    net_rx
+                        .unwrap_or(0)
+                        .saturating_sub(previous_net_rx.unwrap_or(0)),
+                );
+                slot.net_tx = slot.net_tx.saturating_add(
+                    net_tx
+                        .unwrap_or(0)
+                        .saturating_sub(previous_net_tx.unwrap_or(0)),
+                );
                 slot.psi_io_max = slot.psi_io_max.max(psi_io.unwrap_or(0.0));
             }
         }
@@ -730,8 +770,8 @@ fn write_accs(store: &mut Store, accumulators: &[Acc]) -> Result<u64> {
                     },
                     acc.io_read as i64,
                     acc.io_write as i64,
-                    acc.net_rx as i64,
-                    acc.net_tx as i64,
+                    acc.net_seen.then_some(acc.net_rx as i64),
+                    acc.net_seen.then_some(acc.net_tx as i64),
                     acc.psi_cpu_max,
                     acc.psi_mem_max,
                     acc.psi_io_max,
@@ -785,6 +825,7 @@ fn rollup_hour_range(store: &mut Store, start: i64, end: i64) -> Result<u64> {
         io_write: u64,
         net_rx: u64,
         net_tx: u64,
+        net_seen: bool,
     }
     let mut accumulators: Vec<HourAcc> = Vec::new();
     {
@@ -841,6 +882,7 @@ fn rollup_hour_range(store: &mut Store, start: i64, end: i64) -> Result<u64> {
                         io_write: 0,
                         net_rx: 0,
                         net_tx: 0,
+                        net_seen: false,
                     });
                     accumulators.len() - 1
                 });
@@ -866,6 +908,9 @@ fn rollup_hour_range(store: &mut Store, start: i64, end: i64) -> Result<u64> {
             slot.io_write = slot
                 .io_write
                 .saturating_add(io_write.unwrap_or(0).max(0) as u64);
+            if net_rx.is_some() || net_tx.is_some() {
+                slot.net_seen = true;
+            }
             slot.net_rx = slot
                 .net_rx
                 .saturating_add(net_rx.unwrap_or(0).max(0) as u64);
@@ -914,8 +959,8 @@ fn rollup_hour_range(store: &mut Store, start: i64, end: i64) -> Result<u64> {
                     acc.memory_max,
                     acc.io_read as i64,
                     acc.io_write as i64,
-                    acc.net_rx as i64,
-                    acc.net_tx as i64,
+                    acc.net_seen.then_some(acc.net_rx as i64),
+                    acc.net_seen.then_some(acc.net_tx as i64),
                 ])
                 .map_err(|err| Error::Storage(format!("hour rollup row insert: {err}")))?;
         }
@@ -1022,6 +1067,13 @@ mod tests {
             samples >= 10,
             "rollup should aggregate samples, got {samples}"
         );
+        let net: Option<i64> = store
+            .connection()
+            .query_row("SELECT SUM(net_rx_bytes) FROM rollup_1m", [], |row| {
+                row.get(0)
+            })
+            .expect("net");
+        assert_eq!(net, None, "absent network counters must stay NULL");
     }
 
     #[test]
@@ -1101,6 +1153,8 @@ mod tests {
                 path: "/system.slice/web.service".into(),
                 cpu_usage_usec: Some(1_000 * step as u64),
                 memory_current: Some(2_048 + step as u64),
+                net_rx_bytes: Some(1_000 * step as u64),
+                net_tx_bytes: Some(2_000 * step as u64),
                 io: vec![crate::model::CgroupIo {
                     device: "8:0".into(),
                     read_bytes: Some(4_096 * step as u64),
@@ -1120,12 +1174,22 @@ mod tests {
         )
         .expect("prune");
         assert!(report.cgroup_rollup_rows >= 1, "{report:?}");
-        let (avg, total, io_read): (Option<f64>, i64, i64) = store
+        let (avg, total, io_read, net_rx, net_tx): (Option<f64>, i64, i64, i64, i64) = store
             .connection()
             .query_row(
-                "SELECT cpu_avg_pct, SUM(cpu_total_usec), SUM(io_read_bytes) FROM rollup_1m WHERE entity_kind = 'cgroup'",
+                "SELECT cpu_avg_pct, SUM(cpu_total_usec), SUM(io_read_bytes),
+                        SUM(net_rx_bytes), SUM(net_tx_bytes)
+                   FROM rollup_1m WHERE entity_kind = 'cgroup'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .expect("rollup");
         assert!(
@@ -1134,6 +1198,8 @@ mod tests {
         );
         assert!(total > 0, "cpu usecond deltas stored");
         assert!(io_read > 0, "io deltas stored");
+        assert!(net_rx > 0, "network RX deltas stored");
+        assert!(net_tx > 0, "network TX deltas stored");
     }
 
     #[test]

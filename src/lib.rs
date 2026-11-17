@@ -45,7 +45,7 @@ pub const PRODUCT: &str = "SARF";
 /// Human-readable product expansion.
 pub const PRODUCT_LONG: &str = "Service Activity Recorder & Forensics";
 /// Database schema version written to `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 /// Version string of this build.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

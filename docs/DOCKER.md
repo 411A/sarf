@@ -9,6 +9,7 @@ project, then the least-overhead behavior selected for the surveyed VPS.
 | Data | Source | Why |
 |---|---|---|
 | Container CPU, memory, I/O, PIDs | **cgroup v2** under `system.slice/docker-<id>.scope` | kernel accounting; no `docker stats`, one writer, bounded |
+| Container network RX/TX bytes, packets, errors, drops | `/proc/<container-pid>/net/dev` in the container network namespace | one tiny read per container; no Stats API request |
 | Container identity, name, image, labels, Compose project/service | Engine API `GET /containers/json?all=1` + `GET /containers/{id}/json` | one generic inventory, metadata only |
 | Lifecycle (`start`, `die`, `stop`, `kill`, `oom`, `restart`, health) | Engine API `GET /events` in bounded `since`/`until` windows | one request per sampling cycle, no permanent stream thread |
 | Container logs | Engine API `GET /containers/{id}/logs` with `since`/`tail` | respects Docker’s framing, rotation and log-driver support |
@@ -70,8 +71,9 @@ SARF **does not**:
 
 Measured on the surveyed VPS shape (1 vCPU, 10 containers): roughly one events
 request per cycle, 10 inspect requests per 30 s and 10 log reads per 30 s —
-well below one request per second on average. Container CPU/memory accounting
-adds **no** Docker API calls because it uses cgroup v2.
+well below one request per second on average. Container CPU/memory/network
+accounting adds **no** Docker API calls: it uses cgroup v2 plus one small
+`/proc/<pid>/net/dev` read per container per cycle.
 
 ## Permissions
 
@@ -91,13 +93,40 @@ SARF never grants it automatically. Options:
    user’s socket (`unix:///run/user/<uid>/docker.sock`), or grant an equivalent
    read-only proxy. TCP Docker endpoints are intentionally not used.
 
-## Current boundary
+## Per-container network accounting
 
-Per-container **network byte counters** are not yet a time series. Host interface
-counters are collected; container network names/IPs/ports are metadata. If this is
-required, the next step is a schema migration for container network samples (or a
-bounded Docker Stats API fallback), not scraping `/var/lib/docker`. Everything else
-listed above is generic and container-agnostic.
+SARF reads `/proc/<container-pid>/net/dev` once per sampling cycle for each running
+container with a known PID. That file is the container's **network namespace**, so the
+counters belong to the container's interfaces (`eth0`, `veth*`, ...), not the host.
+
+- `lo` is excluded; the remaining interfaces are summed.
+- Counters are cumulative kernel values. They are stored on the container's cgroup
+  sample (`cgroup_samples.net_rx_bytes/net_tx_bytes/...`) and the existing 1-minute
+  rollup stores only the **byte deltas** in `rollup_1m.net_rx_bytes/net_tx_bytes`.
+- `sarf top --by net`, exports and the report's Network ranking consume those values.
+  Network high/low attribution windows use host network rates and rank containers by
+  bytes observed in the window.
+- The cost is one small procfs read per container per cycle, with no Docker Stats
+  request and no extra thread. `docker stats` is still never used.
+- Schema version is now 2; migration is additive
+  (`ALTER TABLE cgroup_samples ADD COLUMN ...`) and works on an existing v1 database.
+
+Boundaries and caveats:
+
+- `network_mode=host` containers are **skipped**: `/proc/<pid>/net/dev` would show
+  host-wide counters and would double-count host traffic. The mode comes from the
+  Engine API inspect; the bounded CLI fallback does not expose it, so host-mode
+  exclusion needs the Engine API path (the default on Unix).
+- Containers that share a network namespace (`network_mode=container:<id>` or a
+  Kubernetes pod sandbox) report the same namespace counters. SARF cannot split them
+  per process; this is documented rather than guessed.
+- A missing/unreadable `/proc/<pid>/net/dev`, a container without a PID, or a stopped
+  container leaves the network columns `NULL` ("unavailable"), never `0`.
+- This is byte/packet accounting only, not flows. No packet capture, connection
+  tracking, payload inspection or HTTP metrics; roadmap phase 8 remains out of scope.
+
+Everything described here is generic and container-agnostic: no project, image,
+container name or log driver is ever used to decide whether accounting applies.
 
 ## Report evidence
 

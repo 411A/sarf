@@ -94,6 +94,13 @@ host, not claims.
   (Compose project/service, image, log driver/path, network/IP, PID, restart policy),
   captured its `create`/`start` events, and persisted its ERROR log lines through the
   bounded log ring. The probe container and temporary data were removed afterward.
+- Live per-container network validation created an arbitrary `nginx` bridge container
+  plus a `--network host` container. `/proc/<pid>/net/dev` counters appeared on the
+  bridge container's cgroup samples (5/5 samples), the host-mode container had no
+  network counters (NULL, never zero), and after the 120-second rollup settle window
+  `rollup_1m` held byte deltas (38,366 RX / 101,568 TX). `sarf top --by net` ranked
+  the probe first and the report rendered the Network ranking. Probe containers and
+  temporary data were removed afterward.
 - The fixture e2e config disables Docker so replay is deterministic and never reads
   the host daemon; Docker is validated by the dedicated API/live tests instead.
 
@@ -107,10 +114,10 @@ Windows 11, Rust 1.98.1, release profile, fixture-driven perf test:
 | 20,000 host rows through the writer | 50.6 ms (≈394,980 rows/s) |
 | Report build + render, 599 points | 5.0 ms, 286,165 bytes |
 
-WSL2 Ubuntu 22.04, Linux 6.6.87, debug profile: 173 unit tests, all integration/e2e/
-policy/plan tests pass; a live 4-cycle run read host/cgroup/PSI counters, discovered 81
-processes, wrote 54 cgroup samples, and produced a 271 KiB report with zero writer
-drops. These numbers are environment-specific measurements, not guarantees.
+WSL2 Ubuntu 22.04, Linux 6.6.87, debug profile: 178 unit tests, all integration/e2e/
+policy/plan tests pass; a live 5-cycle run read host/cgroup/PSI/network counters and
+produced per-container network rollups with zero writer drops. These numbers are
+environment-specific measurements, not guarantees.
 
 ## Reproducing failures
 

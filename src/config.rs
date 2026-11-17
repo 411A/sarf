@@ -184,7 +184,7 @@ impl Default for Cgroup {
 pub struct Network {
     /// Sample host interface counters.
     pub interface_counters: bool,
-    /// Attempt per-container network counters via runtime metadata.
+    /// Read per-container network counters from `/proc/<pid>/net/dev`.
     pub container_counters: bool,
 }
 

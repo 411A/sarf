@@ -192,6 +192,10 @@ pub struct HostBucket {
     pub psi_io_max: Option<f64>,
     /// 1-minute load average (average).
     pub load1_avg: Option<f64>,
+    /// Network receive rate (bytes/second, average).
+    pub net_rx_bps_avg: Option<f64>,
+    /// Network transmit rate (bytes/second, average).
+    pub net_tx_bps_avg: Option<f64>,
 }
 
 /// One entity's contribution inside an attribution bucket.
@@ -217,6 +221,10 @@ pub struct BucketEntity {
     pub io_read: u64,
     /// Storage bytes written.
     pub io_write: u64,
+    /// Network bytes received in the bucket.
+    pub net_rx: u64,
+    /// Network bytes transmitted in the bucket.
+    pub net_tx: u64,
 }
 
 impl BucketEntity {
@@ -227,6 +235,8 @@ impl BucketEntity {
             Metric::Memory => self.memory_max.unwrap_or(0) as f64,
             Metric::IoRead => self.io_read as f64,
             Metric::IoWrite => self.io_write as f64,
+            Metric::NetRx => self.net_rx as f64,
+            Metric::NetTx => self.net_tx as f64,
             _ => 0.0,
         }
     }
@@ -748,16 +758,29 @@ pub fn host_usage(conn: &Connection, window: Window) -> Result<Option<EntityUsag
     let first_wall = points.first().map_or(window.since, |point| point.wall_ns);
     let last_wall = points.last().map_or(window.until, |point| point.wall_ns);
     let covered_ns = last_wall.saturating_sub(first_wall).max(0);
-    let net_rx: u64 = points
-        .iter()
-        .filter_map(|point| point.net_rx_bps)
-        .map(|value| value.max(0.0) as u64)
-        .sum();
-    let net_tx: u64 = points
-        .iter()
-        .filter_map(|point| point.net_tx_bps)
-        .map(|value| value.max(0.0) as u64)
-        .sum();
+    // Network counters are stored as cumulative bytes; `host_series` exposes rates.
+    // Integrate each rate over its sampling interval so the window total is bytes,
+    // not the meaningless sum of bytes-per-second values.
+    let mut net_rx_bytes = 0.0;
+    let mut net_tx_bytes = 0.0;
+    let mut rx_seen = false;
+    let mut tx_seen = false;
+    for pair in points.windows(2) {
+        let elapsed_s = (pair[1].wall_ns - pair[0].wall_ns) as f64 / 1e9;
+        if elapsed_s <= 0.0 {
+            continue;
+        }
+        if let Some(rate) = pair[1].net_rx_bps {
+            rx_seen = true;
+            net_rx_bytes = rate.max(0.0).mul_add(elapsed_s, net_rx_bytes);
+        }
+        if let Some(rate) = pair[1].net_tx_bps {
+            tx_seen = true;
+            net_tx_bytes = rate.max(0.0).mul_add(elapsed_s, net_tx_bytes);
+        }
+    }
+    let net_rx = net_rx_bytes.round() as u64;
+    let net_tx = net_tx_bytes.round() as u64;
     let name = conn
         .query_row(
             "SELECT COALESCE(hostname, 'host') FROM hosts ORDER BY first_seen_wall_ns DESC LIMIT 1",
@@ -782,8 +805,8 @@ pub fn host_usage(conn: &Connection, window: Window) -> Result<Option<EntityUsag
         memory_max_bytes: mem_values.iter().max().copied(),
         io_read_bytes: None,
         io_write_bytes: None,
-        net_rx_bytes: Some(net_rx),
-        net_tx_bytes: Some(net_tx),
+        net_rx_bytes: rx_seen.then_some(net_rx),
+        net_tx_bytes: tx_seen.then_some(net_tx),
         covered_ns,
         sample_count: points.len() as u64,
     }))
@@ -810,6 +833,9 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
         memory_max: Option<u64>,
         io_read: u64,
         io_write: u64,
+        net_rx: u64,
+        net_tx: u64,
+        net_seen: bool,
     }
     let mut accumulators: HashMap<String, Acc> = HashMap::new();
     {
@@ -817,7 +843,7 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
             .prepare(
                 "SELECT entity_id, bucket_wall_ns, sample_count, cpu_avg_pct, cpu_max_pct,
                         cpu_total_usec, memory_avg_bytes, memory_max_bytes,
-                        io_read_bytes, io_write_bytes
+                        io_read_bytes, io_write_bytes, net_rx_bytes, net_tx_bytes
                    FROM rollup_1m
                   WHERE bucket_wall_ns >= ?1 AND bucket_wall_ns < ?2
                     AND entity_kind = 'cgroup'",
@@ -841,6 +867,8 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
             let mem_max: Option<i64> = row.get(7).map_err(db_err)?;
             let io_read: Option<i64> = row.get(8).map_err(db_err)?;
             let io_write: Option<i64> = row.get(9).map_err(db_err)?;
+            let net_rx: Option<i64> = row.get(10).map_err(db_err)?;
+            let net_tx: Option<i64> = row.get(11).map_err(db_err)?;
             let overlap = window.overlap_ns(bucket, bucket + crate::store::retention::MINUTE_NS);
             if overlap <= 0 {
                 continue;
@@ -874,6 +902,15 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
             slot.io_write = slot
                 .io_write
                 .saturating_add(io_write.unwrap_or(0).max(0) as u64);
+            if net_rx.is_some() || net_tx.is_some() {
+                slot.net_seen = true;
+            }
+            slot.net_rx = slot
+                .net_rx
+                .saturating_add(net_rx.unwrap_or(0).max(0) as u64);
+            slot.net_tx = slot
+                .net_tx
+                .saturating_add(net_tx.unwrap_or(0).max(0) as u64);
         }
     }
     let metadata = entity_metadata(conn, EntityKind::Cgroup)?;
@@ -911,8 +948,8 @@ fn cgroup_usage(conn: &Connection, window: Window) -> Result<Vec<EntityUsage>> {
             memory_max_bytes: acc.memory_max,
             io_read_bytes: Some(acc.io_read),
             io_write_bytes: Some(acc.io_write),
-            net_rx_bytes: None,
-            net_tx_bytes: None,
+            net_rx_bytes: acc.net_seen.then_some(acc.net_rx),
+            net_tx_bytes: acc.net_seen.then_some(acc.net_tx),
             covered_ns: acc.covered_ns,
             sample_count: acc.samples,
         });
@@ -1304,6 +1341,14 @@ pub fn buckets(
             host.load_sum += load;
             host.load_count += 1;
         }
+        if let Some(rate) = point.net_rx_bps {
+            host.net_rx_sum += rate;
+            host.net_rx_count += 1;
+        }
+        if let Some(rate) = point.net_tx_bps {
+            host.net_tx_sum += rate;
+            host.net_tx_count += 1;
+        }
     }
 
     let cgroup_names = entity_metadata(conn, EntityKind::Cgroup)?;
@@ -1311,7 +1356,7 @@ pub fn buckets(
         let mut statement = conn
             .prepare(
                 "SELECT entity_id, bucket_wall_ns, cpu_total_usec, memory_max_bytes,
-                        io_read_bytes, io_write_bytes
+                        io_read_bytes, io_write_bytes, net_rx_bytes, net_tx_bytes
                    FROM rollup_1m
                   WHERE bucket_wall_ns >= ?1 AND bucket_wall_ns < ?2
                     AND entity_kind = 'cgroup'",
@@ -1328,6 +1373,8 @@ pub fn buckets(
             let mem: Option<i64> = row.get(3).map_err(db_err)?;
             let io_read: Option<i64> = row.get(4).map_err(db_err)?;
             let io_write: Option<i64> = row.get(5).map_err(db_err)?;
+            let net_rx: Option<i64> = row.get(6).map_err(db_err)?;
+            let net_tx: Option<i64> = row.get(7).map_err(db_err)?;
             let start = bucket_start(wall);
             let cpu_usec = cpu_total.unwrap_or(0).max(0) as u64;
             let (name, container) = match cgroup_names.get(&entity_id) {
@@ -1353,6 +1400,8 @@ pub fn buckets(
                     memory_max: mem.map(|value| value.max(0) as u64),
                     io_read: io_read.unwrap_or(0).max(0) as u64,
                     io_write: io_write.unwrap_or(0).max(0) as u64,
+                    net_rx: net_rx.unwrap_or(0).max(0) as u64,
+                    net_tx: net_tx.unwrap_or(0).max(0) as u64,
                 },
                 start,
             );
@@ -1426,6 +1475,8 @@ pub fn buckets(
                             memory_max: rss.map(|value| value.max(0) as u64),
                             io_read: read.saturating_sub(previous_read),
                             io_write: write.saturating_sub(previous_write),
+                            net_rx: 0,
+                            net_tx: 0,
                         },
                         start,
                     );
@@ -1445,6 +1496,8 @@ pub fn buckets(
                         memory_max: rss.map(|value| value.max(0) as u64),
                         io_read: 0,
                         io_write: 0,
+                        net_rx: 0,
+                        net_tx: 0,
                     },
                     start,
                 );
@@ -1477,6 +1530,16 @@ pub fn buckets(
                     None
                 } else {
                     Some(host.load_sum / host.load_count as f64)
+                },
+                net_rx_bps_avg: if host.net_rx_count == 0 {
+                    None
+                } else {
+                    Some(host.net_rx_sum / host.net_rx_count as f64)
+                },
+                net_tx_bps_avg: if host.net_tx_count == 0 {
+                    None
+                } else {
+                    Some(host.net_tx_sum / host.net_tx_count as f64)
                 },
             },
             entities: Vec::new(),
@@ -1526,6 +1589,10 @@ struct HostAcc {
     psi_io_max: Option<f64>,
     load_sum: f64,
     load_count: u64,
+    net_rx_sum: f64,
+    net_rx_count: u64,
+    net_tx_sum: f64,
+    net_tx_count: u64,
 }
 
 fn merge_entity(
@@ -1547,6 +1614,8 @@ fn merge_entity(
             };
             existing.io_read = existing.io_read.saturating_add(incoming.io_read);
             existing.io_write = existing.io_write.saturating_add(incoming.io_write);
+            existing.net_rx = existing.net_rx.saturating_add(incoming.net_rx);
+            existing.net_tx = existing.net_tx.saturating_add(incoming.net_tx);
         }
         None => {
             entities.insert(key, incoming);
@@ -2053,6 +2122,11 @@ mod tests {
         assert_eq!(point.mem_used_bytes, Some(400_010));
         assert!(point.load1.is_some());
         assert!(point.net_rx_bps.is_none() || point.net_rx_bps.is_some());
+        let usage = host_usage(store.connection(), window)
+            .expect("usage")
+            .expect("host usage");
+        assert_eq!(usage.net_rx_bytes, None, "missing net must not become zero");
+        assert_eq!(usage.net_tx_bytes, None, "missing net must not become zero");
     }
 
     #[test]
@@ -2100,8 +2174,9 @@ mod tests {
             .connection_mut()
             .execute_batch(
                 "INSERT INTO rollup_1m(bucket_wall_ns, entity_id, entity_kind, sample_count,
-                        cpu_total_usec, memory_max_bytes, io_read_bytes, io_write_bytes)
-                 VALUES (600000000000, 'cgroup:1:2', 'cgroup', 12, 500000, 4096, 1000, 2000)",
+                        cpu_total_usec, memory_max_bytes, io_read_bytes, io_write_bytes,
+                        net_rx_bytes, net_tx_bytes)
+                 VALUES (600000000000, 'cgroup:1:2', 'cgroup', 12, 500000, 4096, 1000, 2000, 3000, 4000)",
             )
             .expect("rollup");
         let usage = entity_usage(
@@ -2114,7 +2189,66 @@ mod tests {
             .find(|entry| entry.entity_id == "cgroup:1:2")
             .expect("cgroup usage");
         assert_eq!(cgroup.container.as_deref(), Some("abcdef0123456789"));
+        assert_eq!(cgroup.net_rx_bytes, Some(3000));
+        assert_eq!(cgroup.net_tx_bytes, Some(4000));
         assert!(cgroup.cpu_avg_pct.unwrap() > 0.0);
+
+        let buckets = buckets(
+            store.connection(),
+            Window::new(now - 600 * 1_000_000_000, now),
+            600 * 1_000_000_000,
+            10,
+        )
+        .expect("buckets");
+        let entity = buckets
+            .iter()
+            .flat_map(|bucket| bucket.entities.iter())
+            .find(|entity| entity.entity_id == "cgroup:1:2")
+            .expect("bucket entity");
+        assert_eq!(entity.net_rx, 3000);
+        assert_eq!(entity.net_tx, 4000);
+        assert_eq!(entity.metric_value(Metric::NetRx), 3000.0);
+        assert_eq!(entity.metric_value(Metric::NetTx), 4000.0);
+    }
+
+    #[test]
+    fn host_usage_integrates_network_rates_into_bytes() {
+        let now = 1_000 * 1_000_000_000;
+        let mut store = Store::open_in_memory().expect("store");
+        let mut items = Vec::new();
+        for step in 0..=3u64 {
+            let wall = now - 300 * 1_000_000_000 + step as i64 * 60_000_000_000;
+            let mut net = BTreeMap::new();
+            net.insert(
+                "eth0".to_string(),
+                crate::model::NetCounters {
+                    rx_bytes: step * 6_000,
+                    tx_bytes: step * 3_000,
+                    ..Default::default()
+                },
+            );
+            items.push(WriteItem::normal(WriteRecord::HostSample(HostSample {
+                stamps: stamps(wall, wall),
+                cpu: CpuTimes {
+                    user: 100 * step,
+                    idle: 900 * step,
+                    ..Default::default()
+                },
+                net,
+                ..Default::default()
+            })));
+        }
+        store.write(&items).expect("host samples");
+        let usage = host_usage(
+            store.connection(),
+            Window::new(now - 600 * 1_000_000_000, now),
+        )
+        .expect("usage")
+        .expect("host usage");
+        // Rates are 100 B/s RX and 50 B/s TX; only the two complete intervals
+        // between the first and last point are integrated (3 samples => 120 s).
+        assert_eq!(usage.net_rx_bytes, Some(12_000));
+        assert_eq!(usage.net_tx_bytes, Some(6_000));
     }
 
     #[test]

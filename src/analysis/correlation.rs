@@ -11,8 +11,9 @@
 //! 1. [`query::buckets`] is called once for the requested window, producing host
 //!    context plus ranked entity contributions per bucket.
 //! 2. A per-metric series is built from the host side of each bucket
-//!    (CPU percent of one core, memory bytes, PSI percent, load average). Buckets
-//!    where the sample is missing are skipped, never treated as zero.
+//!    (CPU percent of one core, memory bytes, PSI percent, load average, network
+//!    receive/transmit rate). Buckets where the sample is missing are skipped,
+//!    never treated as zero.
 //! 3. The window baseline is the median of the finite samples. Metrics with fewer
 //!    than six samples produce no windows.
 //! 4. A high bucket must exceed `max(baseline * 1.35, baseline + absolute_delta)`;
@@ -24,8 +25,10 @@
 //!    baseline" without ever implying that an entity was absent.
 //!
 //! Units are explicit and match [`crate::model::Metric`]: CPU and PSI percentages
-//! are percent of **one core**, memory is bytes (rendered as MiB in evidence), I/O
-//! is bytes observed in the window, and load is the raw 1-minute average.
+//! are percent of **one core**, memory is bytes (rendered as MiB in evidence),
+//! network windows use host bytes/second (rendered as KiB/s or MiB/s), I/O and
+//! network contributor totals are bytes observed in the window, and load is the
+//! raw 1-minute average.
 
 use std::collections::BTreeMap;
 
@@ -57,6 +60,8 @@ const LOAD_LOW_DELTA: f64 = 0.5;
 const MEMORY_HIGH_FRACTION: f64 = 0.05;
 /// Minimum low memory change as a fraction of the baseline.
 const MEMORY_LOW_FRACTION: f64 = 0.10;
+/// Minimum absolute network rate change, in bytes per second (16 KiB/s).
+const NETWORK_DELTA: f64 = 16.0 * 1024.0;
 /// Maximum ranked contributors kept per window.
 const MAX_CONTRIBUTORS: usize = 10;
 /// Base confidence for an association.
@@ -135,6 +140,10 @@ struct Acc {
     io_read: u64,
     /// Total storage bytes written in the run.
     io_write: u64,
+    /// Total network bytes received in the run.
+    net_rx: u64,
+    /// Total network bytes transmitted in the run.
+    net_tx: u64,
     /// Number of buckets in which the entity was observed.
     buckets: u32,
 }
@@ -213,6 +222,8 @@ pub fn detect_windows(
         Metric::PsiMemory,
         Metric::PsiIo,
         Metric::Load,
+        Metric::NetRx,
+        Metric::NetTx,
     ] {
         windows.extend(detect_metric_windows(&context, metric));
     }
@@ -278,6 +289,8 @@ fn series_for_metric(buckets: &[Bucket], metric: Metric) -> Vec<Option<f64>> {
             Metric::PsiMemory => bucket.host.psi_memory_max,
             Metric::PsiIo => bucket.host.psi_io_max,
             Metric::Load => bucket.host.load1_avg,
+            Metric::NetRx => bucket.host.net_rx_bps_avg,
+            Metric::NetTx => bucket.host.net_tx_bps_avg,
             _ => None,
         })
         .map(|value| value.filter(|value| value.is_finite()))
@@ -400,12 +413,16 @@ fn build_contributors(
                     memory_max: None,
                     io_read: 0,
                     io_write: 0,
+                    net_rx: 0,
+                    net_tx: 0,
                     buckets: 0,
                 });
             acc.cpu_usec = acc.cpu_usec.saturating_add(entity.cpu_usec);
             acc.memory_max = max_memory(acc.memory_max, entity.memory_max);
             acc.io_read = acc.io_read.saturating_add(entity.io_read);
             acc.io_write = acc.io_write.saturating_add(entity.io_write);
+            acc.net_rx = acc.net_rx.saturating_add(entity.net_rx);
+            acc.net_tx = acc.net_tx.saturating_add(entity.net_tx);
             acc.buckets = acc.buckets.saturating_add(1);
             if acc.name.is_empty() {
                 acc.name.clone_from(&entity.name);
@@ -522,6 +539,24 @@ fn contributor_evidence(
             ),
             MAX_CONTRIBUTOR_EVIDENCE,
         ),
+        Metric::NetRx => push_bounded(
+            &mut evidence,
+            format!(
+                "observed {:.1} MiB received across {} buckets (bytes in window)",
+                item.value / MIB,
+                item.acc.buckets
+            ),
+            MAX_CONTRIBUTOR_EVIDENCE,
+        ),
+        Metric::NetTx => push_bounded(
+            &mut evidence,
+            format!(
+                "observed {:.1} MiB transmitted across {} buckets (bytes in window)",
+                item.value / MIB,
+                item.acc.buckets
+            ),
+            MAX_CONTRIBUTOR_EVIDENCE,
+        ),
         _ => push_bounded(
             &mut evidence,
             format!(
@@ -602,6 +637,10 @@ fn push_host_evidence(evidence: &mut Vec<String>, context: &Context<'_>, run: &[
     let mut load_sum = 0.0;
     let mut load_count = 0u64;
     let mut load_peak = 0.0f64;
+    let mut net_rx_sum = 0.0;
+    let mut net_rx_count = 0u64;
+    let mut net_tx_sum = 0.0;
+    let mut net_tx_count = 0u64;
     let mut psi: [Option<f64>; 3] = [None; 3];
     for &index in run {
         let Some(bucket) = context.buckets.get(index) else {
@@ -625,6 +664,14 @@ fn push_host_evidence(evidence: &mut Vec<String>, context: &Context<'_>, run: &[
             load_sum += load;
             load_count += 1;
             load_peak = load_peak.max(load);
+        }
+        if let Some(rate) = bucket.host.net_rx_bps_avg {
+            net_rx_sum += rate;
+            net_rx_count += 1;
+        }
+        if let Some(rate) = bucket.host.net_tx_bps_avg {
+            net_tx_sum += rate;
+            net_tx_count += 1;
         }
         let candidates = [
             bucket.host.psi_cpu_max,
@@ -671,6 +718,26 @@ fn push_host_evidence(evidence: &mut Vec<String>, context: &Context<'_>, run: &[
         push_bounded(
             evidence,
             format!("host load average averaged {mean:.2} (peak {load_peak:.2})"),
+            MAX_EVIDENCE_LINES,
+        );
+    }
+    if net_rx_count > 0 {
+        push_bounded(
+            evidence,
+            format!(
+                "host network receive averaged {}",
+                format_rate(net_rx_sum / net_rx_count as f64)
+            ),
+            MAX_EVIDENCE_LINES,
+        );
+    }
+    if net_tx_count > 0 {
+        push_bounded(
+            evidence,
+            format!(
+                "host network transmit averaged {}",
+                format_rate(net_tx_sum / net_tx_count as f64)
+            ),
             MAX_EVIDENCE_LINES,
         );
     }
@@ -752,6 +819,8 @@ const fn contribution_metric(window_metric: Metric) -> Metric {
         Metric::Memory | Metric::PsiMemory => Metric::Memory,
         Metric::IoRead => Metric::IoRead,
         Metric::IoWrite => Metric::IoWrite,
+        Metric::NetRx => Metric::NetRx,
+        Metric::NetTx => Metric::NetTx,
         _ => Metric::Cpu,
     }
 }
@@ -762,6 +831,8 @@ fn contribution_value(acc: &Acc, rank_metric: Metric, run_seconds: f64) -> f64 {
         Metric::Memory => acc.memory_max.unwrap_or(0) as f64,
         Metric::IoRead => acc.io_read as f64,
         Metric::IoWrite => acc.io_write as f64,
+        Metric::NetRx => acc.net_rx as f64,
+        Metric::NetTx => acc.net_tx as f64,
         _ => {
             if run_seconds > 0.0 {
                 acc.cpu_usec as f64 * 100.0 / (run_seconds * 1_000_000.0)
@@ -802,6 +873,7 @@ fn high_threshold(metric: Metric, baseline: f64) -> f64 {
     let delta = match metric {
         Metric::Memory => baseline * MEMORY_HIGH_FRACTION,
         Metric::Load => LOAD_HIGH_DELTA,
+        Metric::NetRx | Metric::NetTx => NETWORK_DELTA,
         _ => PERCENT_DELTA,
     };
     (baseline * HIGH_FACTOR).max(baseline + delta)
@@ -817,6 +889,7 @@ fn low_delta(metric: Metric, baseline: f64) -> f64 {
     match metric {
         Metric::Memory => baseline * MEMORY_LOW_FRACTION,
         Metric::Load => LOAD_LOW_DELTA,
+        Metric::NetRx | Metric::NetTx => NETWORK_DELTA,
         _ => PERCENT_DELTA,
     }
 }
@@ -831,7 +904,7 @@ fn is_low(metric: Metric, baseline: f64, value: f64) -> bool {
 /// Percent change from the baseline, signed (negative for low windows).
 fn change_pct(metric: Metric, value: f64, baseline: f64) -> f64 {
     let epsilon = match metric {
-        Metric::Memory => 1.0,
+        Metric::Memory | Metric::NetRx | Metric::NetTx => 1.0,
         Metric::Load => 0.01,
         _ => 0.1,
     };
@@ -939,6 +1012,8 @@ const fn metric_label(metric: Metric) -> &'static str {
         Metric::PsiMemory => "memory pressure",
         Metric::PsiIo => "I/O pressure",
         Metric::Load => "host load average",
+        Metric::NetRx => "host network receive",
+        Metric::NetTx => "host network transmit",
         _ => metric.as_str(),
     }
 }
@@ -948,7 +1023,17 @@ fn format_value(metric: Metric, value: f64) -> String {
     match metric {
         Metric::Memory => format!("{:.1} MiB", value / MIB),
         Metric::Load => format!("{value:.2}"),
+        Metric::NetRx | Metric::NetTx => format_rate(value),
         _ => format!("{value:.1}%"),
+    }
+}
+
+/// Format a bytes-per-second rate with an explicit unit.
+fn format_rate(bytes_per_second: f64) -> String {
+    if bytes_per_second >= MIB {
+        format!("{:.1} MiB/s", bytes_per_second / MIB)
+    } else {
+        format!("{:.1} KiB/s", bytes_per_second / 1024.0)
     }
 }
 
@@ -1275,6 +1360,85 @@ mod tests {
         .expect("windows");
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].kind, WindowKind::High);
+    }
+
+    #[test]
+    fn detects_high_network_window_and_ranks_containers() {
+        let start_wall = 72_000_000_000_000;
+        let intervals = baseline_intervals(12);
+        let mut store = Store::open_in_memory().expect("store");
+        let mut items = Vec::new();
+        let mut rx = 0u64;
+        let mut tx = 0u64;
+        let mut wall = start_wall;
+        let mut user = 0u64;
+        let mut idle = 0u64;
+        let sample = |wall: i64, user: u64, idle: u64, rx: u64, tx: u64| {
+            let mut net = BTreeMap::new();
+            net.insert(
+                "eth0".to_string(),
+                crate::model::NetCounters {
+                    rx_bytes: rx,
+                    tx_bytes: tx,
+                    ..Default::default()
+                },
+            );
+            let mut host = host_sample(wall, user, idle, 500_000, 0.4);
+            host.net = net;
+            WriteItem::normal(WriteRecord::HostSample(host))
+        };
+        items.push(sample(wall, user, idle, rx, tx));
+        for (index, step) in intervals.iter().enumerate() {
+            wall += MINUTE_NS;
+            user += step.busy_ticks;
+            idle += step.total_ticks.saturating_sub(step.busy_ticks);
+            let spiking = (4..7).contains(&index);
+            rx += if spiking { 60 * 1024 * 1024 } else { 60 * 1024 };
+            tx += if spiking { 30 * 1024 * 1024 } else { 60 * 512 };
+            items.push(sample(wall, user, idle, rx, tx));
+        }
+        store.write(&items).expect("host samples");
+
+        let starts = bucket_starts(start_wall, intervals.len());
+        seed_cgroups(&mut store, &starts, 12);
+        use std::fmt::Write as _;
+        let mut sql = String::new();
+        for start in &starts {
+            let _ = writeln!(
+                sql,
+                "UPDATE rollup_1m SET net_rx_bytes = 4 * 1024 * 1024, net_tx_bytes = 1024 \
+                 WHERE bucket_wall_ns = {start} AND entity_id = 'cgroup:1:10';"
+            );
+            let _ = writeln!(
+                sql,
+                "UPDATE rollup_1m SET net_rx_bytes = 1024, net_tx_bytes = 512 \
+                 WHERE bucket_wall_ns = {start} AND entity_id != 'cgroup:1:10' \
+                   AND entity_kind = 'cgroup';"
+            );
+        }
+        store
+            .connection_mut()
+            .execute_batch(&sql)
+            .expect("network rollups");
+
+        let config = Config::default();
+        let windows = detect_windows(
+            store.connection(),
+            window_for(start_wall, intervals.len()),
+            &config,
+        )
+        .expect("windows");
+        let rx_window = windows
+            .iter()
+            .find(|window| window.metric == Metric::NetRx && window.kind == WindowKind::High)
+            .expect("high network receive window");
+        let top = rx_window.contributors.first().expect("ranked contributor");
+        assert_eq!(top.container.as_deref(), Some("container-0"));
+        assert!(
+            rx_window.evidence.iter().any(|line| line.contains("MiB/s")),
+            "network window evidence names a rate: {:?}",
+            rx_window.evidence
+        );
     }
 
     #[test]

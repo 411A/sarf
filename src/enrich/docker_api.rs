@@ -412,6 +412,7 @@ fn parse_summary(value: &Value) -> Option<ContainerInfo> {
         nano_cpus: None,
         pids_limit: None,
         network_ips: Vec::new(),
+        network_mode: None,
     })
 }
 
@@ -571,6 +572,11 @@ fn apply_inspect(container: &mut ContainerInfo, inspect: &Value) {
         .pointer("/HostConfig/PidsLimit")
         .and_then(Value::as_i64)
         .filter(|value| *value > 0);
+    container.network_mode = inspect
+        .pointer("/HostConfig/NetworkMode")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     if container.status.is_empty() {
         container.status = container.state.clone();
     }

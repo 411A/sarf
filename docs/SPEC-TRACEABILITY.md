@@ -14,12 +14,12 @@ as complete.
 | §5.3 | cgroup v2 discovery, counters, inode identity, read-only | `src/collect/cgroup.rs` | cgroup integration + policy read-only snapshot |
 | §5.4–5.6 | proc connector, taskstats, eBPF | **Not implemented in v0.1**; reported as gaps | `sarf capabilities`, coverage report |
 | §5.7 | PSI host/cgroup | `procfs::parse_pressure`, host/cgroup samples | parser + fixtures |
-| §5.8 | Docker Engine API inventory/inspect/events/logs, CLI fallback | `src/enrich/docker_api.rs`, `src/enrich/docker.rs`, `collect/logs.rs` | API parser/mock-socket tests, live Docker validation, absent-continuity test |
+| §5.8 | Docker Engine API inventory/inspect/events/logs, CLI fallback; per-container network from `/proc/<pid>/net/dev` | `src/enrich/docker_api.rs`, `src/enrich/docker.rs`, `src/daemon.rs`, `collect/logs.rs` | API parser/mock-socket tests, live Docker validation, absent-continuity test, network rollup/query/attribution tests |
 | §5.9 | systemd unit mapping | cgroup → unit in `catalog.rs` | classification tests |
 | §5.10 | tmux panes, Zellij sessions | `src/enrich/sessions.rs` | parser tests; Zellij pane topology documented gap |
 | §5.11 | cron/scheduled jobs | **Not implemented in v0.1**; process visibility only | coverage notes |
 | §5.12 | Explicit bounded log sources | `src/collect/logs.rs` | rotation/truncation/flood tests |
-| §6 | Network accounting | Host interface counters implemented; flows/instrumentation not in v0.1 | host parser tests, capabilities |
+| §6 | Network accounting | Host interface counters plus per-container namespace counters (`/proc/<pid>/net/dev`); no flows/instrumentation | host parser tests, cgroup network rollup/query/attribution tests, capabilities |
 | §7.2 | Dual clock, boot scoping | `src/time.rs` | 35+ time/model tests |
 | §7.3–7.4 | Cadences, adaptive incident mode | `daemon.rs` ratios + incident cadence | e2e simulated cycles |
 | §8.1 | PID-reuse-safe process identity | `ProcessIdentity` `(boot,pid,start_ticks)` | PID reuse unit/integration |
@@ -78,5 +78,9 @@ as complete.
 5. Process rollups are deferred; top-N raw samples only (ADR-005).
 6. Log start reads a bounded recent tail, not the whole history (ADR-010).
 7. Crate versions pin the newest offline-cache versions (ADR-007).
+8. Per-container network is namespace-level byte/packet accounting from
+   `/proc/<pid>/net/dev`, not flows or per-process attribution. Host-mode containers
+   are skipped and shared network namespaces report shared counters (ADR-018,
+   `docs/DOCKER.md`).
 8. The TUI and HTTP/flow/eBPF/taskstats/connector phases are explicitly not delivered
    in v0.1 and are surfaced as coverage gaps rather than silently faked.
