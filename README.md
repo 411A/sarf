@@ -254,8 +254,17 @@ It answers "what was consuming the host, and what is related to it?":
 - **Siblings are folded.** Processes with the same executable are one node with
   `n` (six `runc` shims are one row, not six), names are basenames, and the docker
   scope unit (a 64-hex id that `container` already identifies) is omitted.
+- **Is it a schedule?** When the same entity/metric produces at least three episodes
+  whose gaps are within ±50 % of the median, the dossier carries `period_s`. That is
+  the difference between "this bot peaks" and "this bot polls every 120 s" — the
+  first thing to fix when reducing its work.
+- **Runtime identity.** A container scope node carries `image` and `service` (Compose)
+  from the stored Docker labels, so the agent knows what it is patching.
+- **What it does repeatedly.** `work` holds the scope container's most frequent
+  normalized log pattern (digit runs collapsed) and its count in the window. A line
+  seen hundreds of times is the job itself, not noise.
 - **CSV for scanning.** `--csv` prints one row per peak
-  (`id,metric,scope,container,name,start_ns,end_ns,shape,peak,base,p99,score,starts,exits,logs,errors,nodes,processes`),
+  (`metric,scope,container,name,start_s,end_s,shape,peak,base,p99,score,period_s,starts,exits,logs,errors,nodes,processes`),
   ~100 bytes per peak. JSON stays the graph form; CSV is the spreadsheet form.
   Both come from the same document, so they cannot disagree.
 

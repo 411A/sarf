@@ -31,7 +31,7 @@ use crate::store::PeakDossierRow;
 /// Stable document schema name for machine consumers.
 pub const PEAK_SCHEMA: &str = "sarf.peak";
 /// Version of the peak document.
-pub const PEAK_SCHEMA_VERSION: u32 = 3;
+pub const PEAK_SCHEMA_VERSION: u32 = 4;
 /// One bucket of the detection series.
 const MINUTE_NS: i64 = 60_000_000_000;
 /// Minimum baseline points before a peak can be claimed.
@@ -290,6 +290,10 @@ pub struct PeakDossier {
     pub p99: f64,
     /// `peak / max(p99, floor)`, always finite and greater than 1.
     pub score: f64,
+    /// Median interval between this entity/metric's episodes when it repeats
+    /// consistently (a polling loop); omitted when the pattern is not stable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_s: Option<i64>,
     /// Graph nodes; index 0 is the host.
     pub nodes: Vec<PeakNode>,
     /// Typed edges `[parent, child, kind]`.
@@ -302,8 +306,12 @@ pub struct PeakDossier {
     /// Other peaks that overlap or touch the same context window.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub near: Vec<NearPeak>,
-    /// Events and logs counted over `win`.
+    /// Events and logs counted over `win`, scoped to this peak's entities.
     pub activity: PeakActivity,
+    /// The most frequent log pattern from the scope's own container: what the
+    /// service does repeatedly, and how often.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work: Option<WorkPattern>,
     /// Distinct log lines around the peak, errors first, chronological.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<PeakLog>,
@@ -344,6 +352,17 @@ pub struct NearPeak {
     pub peak: f64,
     /// Detection score.
     pub score: f64,
+}
+
+/// The recurring log pattern of the scope container: what it does repeatedly.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkPattern {
+    /// Source id (`docker:<container>`).
+    pub src: String,
+    /// Normalized message (digit runs collapsed) so IDs do not split the pattern.
+    pub pat: String,
+    /// Occurrences in the window.
+    pub n: u32,
 }
 
 /// One distinct log line around the peak.
@@ -408,6 +427,12 @@ pub struct PeakNode {
     /// Container id/name when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
+    /// Container image reference, when this node is a container.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Compose service, when the container is part of a compose project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
     /// systemd unit when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -483,6 +508,8 @@ struct RawPeak {
     base: f64,
     p99: f64,
     buckets: usize,
+    /// Median interval between episodes of the same entity/metric, when stable.
+    period_s: Option<i64>,
 }
 
 /// Detect peaks across every entity and metric in `window`.
@@ -519,6 +546,9 @@ fn detect(
             ));
         }
     }
+    // Periodicity is a property of the whole set, so annotate before truncating:
+    // a bot that peaks every 120 s is a polling loop, not ten separate incidents.
+    annotate_periodicity(&mut peaks);
     peaks.sort_by(|left, right| {
         score(left)
             .total_cmp(&score(right))
@@ -528,6 +558,42 @@ fn detect(
     });
     peaks.truncate(policy.max_peaks);
     Ok(peaks)
+}
+
+/// Set `period_s` when the same entity/metric repeats at a stable interval.
+///
+/// Requires at least three episodes and gaps within ±50 % of the median, so
+/// unrelated peaks never claim to be a schedule.
+fn annotate_periodicity(peaks: &mut [RawPeak]) {
+    let mut starts: HashMap<(String, String), Vec<i64>> = HashMap::new();
+    for peak in peaks.iter() {
+        starts
+            .entry((peak.entity_id.clone(), peak.metric.as_str().to_string()))
+            .or_default()
+            .push(peak.start_wall_ns);
+    }
+    let mut periods: HashMap<(String, String), i64> = HashMap::new();
+    for (key, mut times) in starts {
+        if times.len() < 3 {
+            continue;
+        }
+        times.sort_unstable();
+        let mut gaps: Vec<i64> = times.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        gaps.sort_unstable();
+        let median = gaps[gaps.len() / 2];
+        if median <= 0 {
+            continue;
+        }
+        let consistent =
+            gaps[gaps.len() - 1] <= median.saturating_mul(3) / 2 && gaps[0] >= median / 2;
+        if consistent {
+            periods.insert(key, median / 1_000_000_000);
+        }
+    }
+    for peak in peaks.iter_mut() {
+        let key = (peak.entity_id.clone(), peak.metric.as_str().to_string());
+        peak.period_s = periods.get(&key).copied().filter(|period| *period >= 10);
+    }
 }
 
 fn score(peak: &RawPeak) -> f64 {
@@ -607,6 +673,7 @@ fn detect_series(
                         base: median,
                         p99,
                         buckets: 1,
+                        period_s: None,
                     });
                 }
             },
@@ -838,6 +905,22 @@ pub fn merged_document(
             peaks.push(value);
         }
     }
+    // Cap the merged document too: stored dossiers can outnumber the live cap,
+    // and an agent should not receive 30 rows when max_peaks is 10. Keep the
+    // most exceptional, then present chronologically.
+    peaks.sort_by(|left, right| {
+        right
+            .get("score")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0)
+            .total_cmp(
+                &left
+                    .get("score")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0),
+            )
+    });
+    peaks.truncate(policy.max_peaks);
     peaks.sort_by(|left, right| {
         left.get("start_wall_ns")
             .and_then(serde_json::Value::as_i64)
@@ -870,7 +953,7 @@ pub fn merged_document(
 /// the graph, series and evidence; this keeps what fits in a spreadsheet.
 pub fn csv(document: &serde_json::Value) -> String {
     let mut out = String::from(
-        "id,metric,scope,container,name,start_ns,end_ns,shape,peak,base,p99,score,starts,exits,logs,errors,nodes,processes\n",
+        "metric,scope,container,name,start_s,end_s,shape,peak,base,p99,score,period_s,starts,exits,logs,errors,nodes,processes\n",
     );
     for peak in document
         .get("peaks")
@@ -892,18 +975,18 @@ pub fn csv(document: &serde_json::Value) -> String {
         let _ = writeln!(
             out,
             "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            field(json_str(peak.get("id"))),
             field(json_str(peak.get("metric"))),
             field(json_str(peak.get("scope"))),
             field(json_str(scope.and_then(|node| node.get("container")))),
             field(json_str(scope.and_then(|node| node.get("name")))),
-            json_int(peak.get("start_wall_ns")),
-            json_int(peak.get("end_wall_ns")),
+            json_seconds(peak.get("start_wall_ns")),
+            json_seconds(peak.get("end_wall_ns")),
             field(json_str(peak.get("shape"))),
             json_num(peak.get("peak")),
             json_num(peak.get("base")),
             json_num(peak.get("p99")),
             json_num(peak.get("score")),
+            json_int(peak.get("period_s")),
             json_int(activity.and_then(|value| value.get("starts"))),
             json_int(activity.and_then(|value| value.get("exits"))),
             json_int(activity.and_then(|value| value.get("logs"))),
@@ -923,6 +1006,13 @@ fn json_int(value: Option<&serde_json::Value>) -> String {
     value
         .and_then(serde_json::Value::as_i64)
         .map_or_else(String::new, |number| number.to_string())
+}
+
+/// Peak buckets are minute-aligned: seconds are enough and half the characters.
+fn json_seconds(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(serde_json::Value::as_i64)
+        .map_or_else(String::new, |nanos| (nanos / 1_000_000_000).to_string())
 }
 
 fn json_num(value: Option<&serde_json::Value>) -> String {
@@ -1030,6 +1120,8 @@ fn build_dossier(
         pid: None,
         n: None,
         container: None,
+        image: None,
+        service: None,
         unit: None,
         value: host_value.map(|value| round_metric(raw.metric, value)),
         share: Some(1.0),
@@ -1049,6 +1141,12 @@ fn build_dossier(
             .or_else(|| scope_usage.and_then(|row| entity_value(row, raw.metric)));
         scope_index = nodes.len();
         index.insert(raw.entity_id.clone(), scope_index);
+        let labels = query::entity_labels(conn, &raw.entity_id)?;
+        let scope_image = labels
+            .get("container_image")
+            .or_else(|| labels.get("image"))
+            .cloned();
+        let scope_service = labels.get("compose_service").cloned();
         nodes.push(PeakNode {
             id: raw.entity_id.clone(),
             name: scope_usage.map_or_else(|| raw.entity_id.clone(), |row| row.name.clone()),
@@ -1056,6 +1154,8 @@ fn build_dossier(
             pid: None,
             n: None,
             container: scope_usage.and_then(|row| row.container.clone()),
+            image: scope_image,
+            service: scope_service,
             unit: None,
             value: value.map(|value| round_metric(raw.metric, value)),
             share: value.map(|value| round_share(value / host_scale)),
@@ -1114,6 +1214,7 @@ fn build_dossier(
         for (_, cgroup, series, base, value) in candidates.into_iter().take(slots) {
             let node_index = nodes.len();
             index.insert(cgroup.entity_id.clone(), node_index);
+            let labels = query::entity_labels(conn, &cgroup.entity_id)?;
             nodes.push(PeakNode {
                 id: cgroup.entity_id.clone(),
                 name: cgroup.name.clone(),
@@ -1121,6 +1222,11 @@ fn build_dossier(
                 pid: None,
                 n: None,
                 container: cgroup.container.clone(),
+                image: labels
+                    .get("container_image")
+                    .or_else(|| labels.get("image"))
+                    .cloned(),
+                service: labels.get("compose_service").cloned(),
                 unit: None,
                 value: Some(round_metric(raw.metric, value)),
                 share: Some(round_share(value / host_scale)),
@@ -1196,6 +1302,11 @@ fn build_dossier(
     }
 
     let activity = query::window_activity(conn, context)?;
+    let work = if raw.entity_kind == "cgroup" {
+        work_pattern(conn, &nodes[scope_index].name, context)?
+    } else {
+        None
+    };
     let logs = context_logs(conn, &nodes, context, raw.start_wall_ns)?;
     let events = context_events(
         conn,
@@ -1251,6 +1362,7 @@ fn build_dossier(
         base: round_metric(raw.metric, raw.base),
         p99: round_metric(raw.metric, raw.p99),
         score: round_score(score(raw)),
+        period_s: raw.period_s,
         nodes,
         edges,
         series,
@@ -1270,6 +1382,7 @@ fn build_dossier(
             logs: activity.logs,
             errors: activity.errors,
         },
+        work,
         logs,
         events,
     })
@@ -1354,6 +1467,8 @@ fn push_process_nodes(
             pid: identity.map(|meta| meta.pid),
             n: (group.count > 1).then_some(group.count),
             container,
+            image: None,
+            service: None,
             unit,
             value,
             share: value.map(|value| round_share(value / host_scale)),
@@ -1421,6 +1536,87 @@ fn round_score(value: f64) -> f64 {
 /// Info lines are counted in `activity` but not listed, because a periodic info
 /// log is not evidence for a resource peak. If a peak has no warning/error at
 /// all, the nearest few lines are kept so the episode is not blind.
+/// The recurring log pattern of one container in the window.
+///
+/// A bot that logs the same normalized line ten times a minute is doing a
+/// periodic job; that is the first thing to look at when reducing its work.
+fn work_pattern(
+    conn: &Connection,
+    scope_name: &str,
+    window: Window,
+) -> Result<Option<WorkPattern>> {
+    let source_id = format!("docker:{scope_name}");
+    let records = query::logs(
+        conn,
+        &LogFilter {
+            window: Some(window),
+            source_id: Some(source_id.clone()),
+            limit: MAX_CONTEXT_READ,
+            ..LogFilter::default()
+        },
+    )?;
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for record in &records {
+        if record.message.trim().is_empty() {
+            continue;
+        }
+        let pattern = normalize_message(&record.message);
+        let counter = counts.entry(pattern).or_default();
+        *counter = counter.saturating_add(1);
+    }
+    let Some((pat, n)) = counts
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
+    else {
+        return Ok(None);
+    };
+    // A pattern seen once or twice is not a loop.
+    if n < 3 {
+        return Ok(None);
+    }
+    Ok(Some(WorkPattern {
+        src: source_id,
+        pat,
+        n,
+    }))
+}
+
+/// Collapse digit runs and whitespace so IDs and counters do not split a pattern.
+fn normalize_message(message: &str) -> String {
+    let mut out = String::with_capacity(120);
+    let mut in_digits = false;
+    let mut last_space = false;
+    let mut len = 0usize;
+    for ch in message.chars() {
+        if ch.is_ascii_digit() {
+            if !in_digits {
+                out.push('#');
+                len += 1;
+                in_digits = true;
+            }
+            last_space = false;
+            continue;
+        }
+        in_digits = false;
+        if ch.is_whitespace() {
+            if !last_space && len > 0 {
+                out.push(' ');
+                len += 1;
+            }
+            last_space = true;
+            continue;
+        }
+        last_space = false;
+        out.push(ch);
+        len += 1;
+        if len >= 100 {
+            out.push('…');
+            break;
+        }
+    }
+    out.trim_end().to_string()
+}
+
 fn context_logs(
     conn: &Connection,
     nodes: &[PeakNode],
@@ -1829,7 +2025,7 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO entities(entity_id, kind, stable_key, name, source, labels_json, first_seen_wall_ns, last_seen_wall_ns)
-             VALUES ('cgroup:1:20','cgroup','20:1','utazbot_tgbot','cgroup','{\"container_id\":\"7ed4aa8bf4c7\"}',?1,?1)",
+             VALUES ('cgroup:1:20','cgroup','20:1','utazbot_tgbot','cgroup','{\"container_id\":\"7ed4aa8bf4c7\",\"container_image\":\"python:3.12-slim\",\"compose_service\":\"utazbot\"}',?1,?1)",
             rusqlite::params![base],
         )
         .unwrap();
@@ -1990,6 +2186,17 @@ mod tests {
         assert!(peak.win.from_wall_ns < peak.start_wall_ns);
         assert!(peak.win.to_wall_ns > peak.end_wall_ns);
         assert_eq!(peak.win.class, "fast");
+        // The container's runtime identity is exposed for the coding agent.
+        assert_eq!(
+            peak.nodes[scope_index_of(peak, "cgroup")].image.as_deref(),
+            Some("python:3.12-slim")
+        );
+        assert_eq!(
+            peak.nodes[scope_index_of(peak, "cgroup")]
+                .service
+                .as_deref(),
+            Some("utazbot")
+        );
         assert!(
             (1_000_000_000..=2_000_000_000).contains(&peak.win.h),
             "a CPU peak margin stays within 1-2 s: {}",
@@ -2090,6 +2297,59 @@ mod tests {
         assert_eq!(horizon.stretch, 0.0);
     }
 
+    fn scope_index_of(peak: &PeakDossier, kind: &str) -> usize {
+        peak.nodes
+            .iter()
+            .position(|node| node.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind} node"))
+    }
+
+    #[test]
+    fn periodic_peaks_report_their_interval() {
+        let base = 1_600_000_000_000_000_000i64;
+        let make = |minute: i64| RawPeak {
+            entity_id: "cgroup:1:20".to_string(),
+            entity_kind: "cgroup".to_string(),
+            metric: Metric::Cpu,
+            start_wall_ns: base + minute * MINUTE_NS,
+            end_wall_ns: base + (minute + 1) * MINUTE_NS,
+            peak: 80.0,
+            base: 10.0,
+            p99: 20.0,
+            buckets: 1,
+            period_s: None,
+        };
+        let mut peaks = vec![make(0), make(2), make(4), make(6)];
+        annotate_periodicity(&mut peaks);
+        assert!(
+            peaks.iter().all(|peak| peak.period_s == Some(120)),
+            "periods: {:?}",
+            peaks.iter().map(|p| p.period_s).collect::<Vec<_>>()
+        );
+
+        // Irregular gaps are not a schedule.
+        let mut irregular = vec![make(0), make(2), make(9), make(30)];
+        annotate_periodicity(&mut irregular);
+        assert!(irregular.iter().all(|peak| peak.period_s.is_none()));
+    }
+
+    #[test]
+    fn work_pattern_collapses_ids_and_ignores_one_offs() {
+        assert_eq!(
+            normalize_message("FOUND 12 valid proxies (ID: 345)"),
+            "FOUND # valid proxies (ID: #)"
+        );
+        let store = Store::open_in_memory().expect("store");
+        let base = 1_600_000_000_000_000_000i64;
+        seed(&store, base);
+        let window = Window::new(base, base + 86 * MINUTE_NS);
+        let pattern = work_pattern(store.connection(), "utazbot_tgbot", window)
+            .expect("query")
+            .expect("pattern");
+        assert_eq!(pattern.pat, "upstream timed out");
+        assert_eq!(pattern.n, 3);
+    }
+
     #[test]
     fn container_filter_reports_only_container_scopes() {
         let store = Store::open_in_memory().expect("store");
@@ -2107,6 +2367,16 @@ mod tests {
             .iter()
             .all(|peak| peak.scope.starts_with("cgroup:")));
         assert!(filtered.peaks.iter().any(|peak| peak.metric == "cpu"));
+        let container_peak = filtered
+            .peaks
+            .iter()
+            .find(|peak| peak.metric == "cpu")
+            .expect("container cpu peak");
+        assert!(
+            container_peak.work.as_ref().is_some_and(|work| work.n >= 3),
+            "work: {:?}",
+            container_peak.work
+        );
 
         // The same window without the filter also reports host-scoped peaks.
         let all = document(store.connection(), window, &policy(), None).expect("all");
@@ -2143,7 +2413,7 @@ mod tests {
         let mut lines = text.lines();
         assert_eq!(
             lines.next().expect("header"),
-            "id,metric,scope,container,name,start_ns,end_ns,shape,peak,base,p99,score,starts,exits,logs,errors,nodes,processes"
+            "metric,scope,container,name,start_s,end_s,shape,peak,base,p99,score,period_s,starts,exits,logs,errors,nodes,processes"
         );
         let rows: Vec<&str> = lines.collect();
         assert_eq!(

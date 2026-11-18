@@ -342,7 +342,7 @@ fn peaks_command_emits_a_deterministic_agent_document() {
     );
     let document: serde_json::Value = serde_json::from_str(text.trim()).expect("peaks JSON");
     assert_eq!(document["schema"], "sarf.peak");
-    assert_eq!(document["v"], 3);
+    assert_eq!(document["v"], 4);
     let peaks = document["peaks"].as_array().expect("peaks array");
     // The fixture run is too short to satisfy the five-bucket baseline (its
     // rollups are two minutes apart), so this test asserts the document

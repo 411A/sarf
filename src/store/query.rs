@@ -1753,6 +1753,21 @@ pub fn host_entity(conn: &Connection) -> Result<Option<(String, String)>> {
     }
 }
 
+/// Labels stored for one entity (bounded, non-secret).
+pub fn entity_labels(conn: &Connection, entity_id: &str) -> Result<BTreeMap<String, String>> {
+    let mut statement = conn
+        .prepare("SELECT labels_json FROM entities WHERE entity_id = ?1")
+        .map_err(db_err)?;
+    let mut rows = statement.query(params![entity_id]).map_err(db_err)?;
+    let Some(row) = rows.next().map_err(db_err)? else {
+        return Ok(BTreeMap::new());
+    };
+    let text: Option<String> = row.get(0).map_err(db_err)?;
+    Ok(text
+        .and_then(|text| serde_json::from_str::<BTreeMap<String, String>>(&text).ok())
+        .unwrap_or_default())
+}
+
 /// Entity ids of cgroups that belong to a container.
 ///
 /// A cgroup is a container when the catalog labelled it with `container_id` or

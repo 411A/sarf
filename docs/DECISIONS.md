@@ -636,6 +636,29 @@ A 10-peak container document was still ~70 KB, and the bulk was not the graph:
   peaks. JSON remains the graph form; CSV is the scanning form, generated from the
   same document.
 
+### Amendment 5 - what a coding agent needs to fix the watched service
+
+The previous document could tell *which* container peaked, but not *why* it is
+expensive to run:
+
+- **Periodicity.** Repeated episodes of the same entity/metric with gaps within ±50 %
+  of the median now carry `period_s` (minimum three episodes). A bot peaking every
+  120 s is a polling loop, and that is the first thing to change in its code.
+- **Runtime identity.** Container scope nodes carry `image` and Compose `service`
+  from the stored labels, so the agent knows the runtime it is patching.
+- **Recurring work.** `work` reports the scope container's most frequent log pattern
+  with digit runs collapsed (`FOUND # valid proxies (ID: #)`), and how often it
+  occurred. Repetition is the job; one error line is the symptom.
+- **Stale dossiers are not mixed in.** The payload schema is v4, and the merge only
+  accepts the current version, so a detector change (stricter floors, folded
+  processes) cannot be contradicted by a dossier produced by an older policy.
+- **Merged documents are capped.** The merged output keeps the `max_peaks` most
+  exceptional rows, so a 24 h query returns ten peaks, not thirty, while the CSV
+  carries `period_s` for scanning.
+- **CSV shrank.** `id` was dropped (derivable from scope+metric+start) and timestamps
+  are seconds, since buckets are minute-aligned: 17 columns, about 60 bytes per peak.
+
+
 
 
 
