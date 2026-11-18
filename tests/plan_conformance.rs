@@ -71,6 +71,15 @@ fn every_documented_command_parses() {
         &["sarf", "peaks", "--containers", "--since", "72h"],
         &[
             "sarf",
+            "top",
+            "--containers",
+            "--by",
+            "cpu",
+            "--limit",
+            "10",
+        ],
+        &[
+            "sarf",
             "peaks",
             "--stored",
             "--since",

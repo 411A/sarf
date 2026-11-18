@@ -607,6 +607,9 @@ Three field findings from a 10-container host:
   `share` remains a fraction of the host.
 - **`status --brief`** returns only freshness, storage, gaps, counts and runs
   (~1.5 KB instead of ~19 KB with the collector and integration tables).
+- **`top --containers`** applies the container rule to the live ranking, so a
+  container view is one command: container cgroups and the processes inside them,
+  nothing from the host or system units.
 
 
 

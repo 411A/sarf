@@ -305,7 +305,12 @@ pub fn main() -> Result<i32> {
         Command::Status { brief } => system::status(&context, *brief),
         Command::Capabilities => system::capabilities(&context),
         Command::Gaps => system::gaps(&context),
-        Command::Top { since, by, limit } => query::top(&context, since, *by, *limit),
+        Command::Top {
+            since,
+            by,
+            containers,
+            limit,
+        } => query::top(&context, since, *by, *containers, *limit),
         Command::Processes {
             since,
             filter,

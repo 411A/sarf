@@ -66,6 +66,9 @@ pub enum Command {
         /// Metric to rank by.
         #[arg(long, value_enum, default_value = "cpu")]
         by: ByMetric,
+        /// Only container cgroups and the processes running inside containers.
+        #[arg(long)]
+        containers: bool,
         /// Maximum rows.
         #[arg(long, default_value_t = 15)]
         limit: usize,

@@ -1,6 +1,6 @@
 //! Read-side query commands: top, processes, tree, why, incidents, show, logs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Serialize;
 
@@ -10,14 +10,24 @@ use crate::commands::{
     fmt_bytes, fmt_clock, fmt_pct, fmt_span, fmt_time, print_json, print_table, Context,
 };
 use crate::error::{Error, Result};
-use crate::model::{Metric, Severity};
+use crate::model::{EntityKind, Metric, Severity};
 use crate::store::query::{self, EventFilter, LogFilter, Window};
 
 /// Rank entities by one metric.
-pub fn top(context: &Context, since: &str, by: ByMetric, limit: usize) -> Result<i32> {
+pub fn top(
+    context: &Context,
+    since: &str,
+    by: ByMetric,
+    containers_only: bool,
+    limit: usize,
+) -> Result<i32> {
     let store = context.open_read()?;
     let window = context.window(since)?;
     let mut usage = query::entity_usage(store.connection(), window)?;
+    if containers_only {
+        let containers = query::container_entities(store.connection())?;
+        retain_container_rows(&mut usage, &containers);
+    }
     let _metric = match by {
         ByMetric::Cpu => Metric::Cpu,
         ByMetric::Mem => Metric::Memory,
@@ -886,6 +896,21 @@ fn story_evidence_is_context(line: &str) -> bool {
     REPEATED.iter().any(|prefix| line.starts_with(prefix))
 }
 
+/// Keep only container cgroups and the processes running inside a container.
+fn retain_container_rows(rows: &mut Vec<query::EntityUsage>, containers: &BTreeSet<String>) {
+    rows.retain(|row| match row.kind {
+        EntityKind::Cgroup => containers.contains(&row.entity_id),
+        EntityKind::Process => row.container.is_some(),
+        EntityKind::Host
+        | EntityKind::SystemdUnit
+        | EntityKind::Container
+        | EntityKind::Session
+        | EntityKind::Tool
+        | EntityKind::LogSource
+        | EntityKind::NetworkInterface => false,
+    });
+}
+
 fn story_value(metric: &str, value: f64) -> String {
     match metric {
         "memory" | "io_read" | "io_write" | "net_rx" | "net_tx" => {
@@ -1158,5 +1183,43 @@ mod tests {
     fn psi_values_are_pressure_not_cpu_core_percent() {
         assert_eq!(Metric::Cpu.format_value(6.2), "6.2% of one core");
         assert_eq!(Metric::PsiCpu.format_value(6.2), "6.2%");
+    }
+
+    #[test]
+    fn container_rows_keep_only_containers_and_their_processes() {
+        fn usage(entity_id: &str, kind: EntityKind, container: Option<&str>) -> query::EntityUsage {
+            query::EntityUsage {
+                entity_id: entity_id.to_string(),
+                kind,
+                name: entity_id.to_string(),
+                tool: None,
+                role: None,
+                container: container.map(str::to_string),
+                cpu_avg_pct: Some(1.0),
+                cpu_max_pct: Some(1.0),
+                cpu_total_usec: Some(1),
+                memory_avg_bytes: Some(1),
+                memory_max_bytes: Some(1),
+                io_read_bytes: Some(0),
+                io_write_bytes: Some(0),
+                net_rx_bytes: Some(0),
+                net_tx_bytes: Some(0),
+                covered_ns: 1,
+                sample_count: 1,
+            }
+        }
+        let mut rows = vec![
+            usage("host:a", EntityKind::Host, None),
+            usage("cgroup:1:1", EntityKind::Cgroup, None),
+            usage("cgroup:1:2", EntityKind::Cgroup, Some("abc")),
+            usage("proc:a:1:1", EntityKind::Process, Some("abc")),
+            usage("proc:a:2:1", EntityKind::Process, None),
+        ];
+        let containers = BTreeSet::from(["cgroup:1:2".to_string()]);
+        retain_container_rows(&mut rows, &containers);
+        assert_eq!(rows.len(), 2, "rows: {rows:?}");
+        assert!(rows
+            .iter()
+            .all(|row| row.container.as_deref() == Some("abc")));
     }
 }

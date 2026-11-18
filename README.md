@@ -172,7 +172,7 @@ test suite; they are measurements, not guarantees. See `docs/TESTING.md`.
 sarf init [--force]
 sarf run [--config PATH] [--cycles N] [--fixture-root PATH] [--simulate] [--interval-secs N]
 sarf doctor | status [--brief] | capabilities | gaps
-sarf top [--since 1h] [--by cpu|mem|net|io] [--limit N]
+sarf top [--since 1h] [--by cpu|mem|net|io] [--containers] [--limit N]
 sarf processes [--since 1h] [--filter TEXT]
 sarf tree [--since 1h] [--process ID] [--service NAME]
 sarf why [--since 1h] [--metric cpu|memory|psi_cpu|psi_memory|psi_io|load]
@@ -230,11 +230,13 @@ It answers "what was consuming the host, and what is related to it?":
   daemon stored — deduplicated by id. Nothing is streamed or split; the payload is
   about **1.5–2 KB per peak** (a 10-peak hour is ~20 KB), which fits an agent
   context directly.
-- **Container-only focus.** `--containers` restricts detection to cgroups that belong
-  to a container (catalog `container_id` label or a docker/containerd/k8s/CRI-O
-  cgroup path), so host and system-unit peaks never appear. Stored dossiers are
-  filtered the same way, and the graph still roots at the host so `share` stays
-  meaningful.
+- **Container-only focus.** `sarf peaks --containers` restricts detection to cgroups
+  that belong to a container (catalog `container_id` label or a
+  docker/containerd/k8s/CRI-O cgroup path), so host and system-unit peaks never
+  appear. Stored dossiers are filtered the same way, and the graph still roots at the
+  host so `share` stays meaningful. `sarf top --containers` applies the same filter to
+  the live ranking: container cgroups plus the processes running inside them, nothing
+  else.
 - **Zero is never ambiguous.** Every document carries `coverage`
   (`entities`, `buckets`, `from_wall_ns`, `to_wall_ns`); an empty document also
   carries `note`, e.g. *"no 1-minute rollups in this window: the collector was not
