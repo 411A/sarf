@@ -717,6 +717,9 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         // or storing the peaks that are still inside the rollup window.
         if run_prune {
             prune(&options, &writer, stamps.wall, &mut health);
+            // Stamp completion, not the start: a prune that outlives the
+            // interval must not immediately schedule another one.
+            last_prune_mono = clock.mono_ns();
         }
         if sample_discovery {
             batch.extend(health.write_items());

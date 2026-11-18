@@ -699,4 +699,32 @@ Bounds: 1-120 s, 10-4000 Hz, 20 symbols, 1 MiB report output, 60 s report timeou
   reproducible after the fact; a profile is a live sample with a duration. Merging
   them would make the peak document non-deterministic.
 
+## ADR-027 - Retention needs time-leading indexes, and prune is stamped after it ends
+
+**Context.** A 178 MB database with 480 k `cgroup_samples` made every retention pass
+take 51 s of wall clock with 0.2 s user and 0.7 s system time: the process was
+waiting on I/O, not computing. Retention deletes and rollup reads filter by time
+alone (`WHERE wall_ts_ns < ?`, `WHERE bucket_wall_ns >= ?`), but the only indexes on
+`cgroup_samples`, `process_samples`, `rollup_1m` and `rollup_1h` lead with
+`entity_id`, so SQLite scanned the whole table. Because prune runs before the first
+batch is submitted, every scan blocked collection: the service stayed `active` and
+persisted nothing, and a restart in the middle left the rollup cursor behind, so the
+next start paid the same cost.
+
+**Decision.** Schema v4 adds `cgroup_samples_time`, `process_samples_time`,
+`rollup_1m_bucket` and `rollup_1h_bucket` (migration 4, `IF NOT EXISTS`, additive).
+The daemon also stamps `last_prune_mono` after the pass completes instead of when it
+is scheduled, so a prune longer than `prune_interval_secs` cannot schedule an
+immediate second one.
+
+**Consequences.**
+
+- Deletes and rollup reads become range seeks; the one-time index build on an
+  existing database costs a few seconds, then prunes are milliseconds.
+- Existing databases migrate automatically at the next `sarf run`/`sarf prune`.
+  A hand-created index with the same name and columns is left untouched, so a
+  database repaired before the upgrade does not pay for it twice.
+- No data is deleted or rewritten by the migration; it is additive.
+
+
 

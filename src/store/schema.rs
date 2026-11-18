@@ -10,7 +10,7 @@
 //! and tested against a fresh database and against an existing one.
 
 /// Current schema version. Increment when adding a migration.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Version-1 schema.
 pub const MIGRATION_1: &str = r"
@@ -352,6 +352,21 @@ CREATE INDEX IF NOT EXISTS peak_dossiers_start ON peak_dossiers(started_wall_ns)
 CREATE INDEX IF NOT EXISTS peak_dossiers_scope ON peak_dossiers(scope_entity_id, started_wall_ns);
 ";
 
+/// Version-4 migration: time-leading indexes for retention.
+///
+/// Retention deletes and rollup reads by time alone. The existing composite
+/// indexes lead with `entity_id`, so `DELETE ... WHERE wall_ts_ns < ?` scanned the
+/// whole table: a 480 k-row `cgroup_samples` table made every prune wait ~50 s on
+/// I/O, and because prune runs before the first batch is submitted, the collector
+/// looked alive while persisting nothing. These indexes turn those scans into range
+/// seeks.
+pub const MIGRATION_4: &str = r"
+CREATE INDEX IF NOT EXISTS cgroup_samples_time ON cgroup_samples(wall_ts_ns);
+CREATE INDEX IF NOT EXISTS process_samples_time ON process_samples(wall_ts_ns);
+CREATE INDEX IF NOT EXISTS rollup_1m_bucket ON rollup_1m(bucket_wall_ns);
+CREATE INDEX IF NOT EXISTS rollup_1h_bucket ON rollup_1h(bucket_wall_ns);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,26 +424,50 @@ mod tests {
             assert!(MIGRATION_2.contains(column), "missing {column}");
         }
         assert!(!MIGRATION_2.contains("REFERENCES"));
-        assert_eq!(SCHEMA_VERSION, 3);
+        assert_eq!(SCHEMA_VERSION, 4);
+    }
+
+    #[test]
+    fn migration_four_adds_time_leading_indexes_for_retention() {
+        for index in [
+            "cgroup_samples_time",
+            "process_samples_time",
+            "rollup_1m_bucket",
+            "rollup_1h_bucket",
+        ] {
+            assert!(MIGRATION_4.contains(index), "missing {index}");
+        }
+        // Retention filters by time alone; a composite index leading with
+        // entity_id cannot serve `WHERE wall_ts_ns < ?`.
+        for statement in [
+            "cgroup_samples(wall_ts_ns)",
+            "process_samples(wall_ts_ns)",
+            "rollup_1m(bucket_wall_ns)",
+            "rollup_1h(bucket_wall_ns)",
+        ] {
+            assert!(MIGRATION_4.contains(statement), "missing {statement}");
+        }
     }
 
     #[test]
     fn schema_has_query_indexes_for_the_hot_paths() {
+        let all = format!("{MIGRATION_1}{MIGRATION_4}");
         for index in [
             "process_lifetimes_pid_start",
             "process_lifetimes_start",
             "host_samples_time",
             "cgroup_samples_entity_time",
+            "cgroup_samples_time",
             "process_samples_entity_time",
+            "process_samples_time",
+            "rollup_1m_bucket",
+            "rollup_1h_bucket",
             "logs_source_time",
             "logs_incident",
             "events_entity_time",
             "incidents_start",
         ] {
-            assert!(
-                MIGRATION_1.contains(index),
-                "missing hot-path index {index}"
-            );
+            assert!(all.contains(index), "missing hot-path index {index}");
         }
     }
 }

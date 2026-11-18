@@ -423,6 +423,10 @@ impl Store {
                 tx.execute_batch(schema::MIGRATION_3)
                     .map_err(|err| Error::Storage(format!("apply schema v3: {err}")))?;
             }
+            if version < 4 {
+                tx.execute_batch(schema::MIGRATION_4)
+                    .map_err(|err| Error::Storage(format!("apply schema v4: {err}")))?;
+            }
             tx.execute_batch(&format!(
                 "PRAGMA user_version = {};",
                 schema::SCHEMA_VERSION
@@ -1144,7 +1148,7 @@ mod tests {
     #[test]
     fn migration_sets_version() {
         let store = store();
-        assert_eq!(store.schema_version().expect("version"), 3);
+        assert_eq!(store.schema_version().expect("version"), 4);
     }
 
     #[test]
@@ -1158,7 +1162,7 @@ mod tests {
             path: PathBuf::from(":memory:"),
         };
         store.migrate().expect("migrate");
-        assert_eq!(store.schema_version().expect("version"), 3);
+        assert_eq!(store.schema_version().expect("version"), 4);
         let mut statement = store
             .connection()
             .prepare("PRAGMA table_info(cgroup_samples)")
@@ -1532,7 +1536,7 @@ mod tests {
                 .expect("write");
         }
         let reopened = Store::open(&path).expect("reopen");
-        assert_eq!(reopened.schema_version().expect("version"), 3);
+        assert_eq!(reopened.schema_version().expect("version"), 4);
         assert_eq!(reopened.meta_get("k").expect("meta").as_deref(), Some("v"));
     }
 }
