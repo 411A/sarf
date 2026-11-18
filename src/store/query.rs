@@ -9,7 +9,7 @@
 //! (they can exceed 100 for multi-core cgroups), memory is bytes, I/O is bytes, and
 //! `*_bps` values are bytes per second.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -1751,6 +1751,73 @@ pub fn host_entity(conn: &Connection) -> Result<Option<(String, String)>> {
         ))),
         None => Ok(None),
     }
+}
+
+/// Entity ids of cgroups that belong to a container.
+///
+/// A cgroup is a container when the catalog labelled it with `container_id` or
+/// when its path encodes a container id (docker/containerd/k8s/CRI-O layouts).
+pub fn container_entities(conn: &Connection) -> Result<BTreeSet<String>> {
+    let mut statement = conn
+        .prepare("SELECT entity_id, name, labels_json FROM entities WHERE kind = 'cgroup'")
+        .map_err(db_err)?;
+    let mut rows = statement.query([]).map_err(db_err)?;
+    let mut containers = BTreeSet::new();
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let entity_id: String = row.get(0).map_err(db_err)?;
+        let name: String = row.get(1).map_err(db_err)?;
+        let labels_json: Option<String> = row.get(2).map_err(db_err)?;
+        let labelled = labels_json
+            .and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok())
+            .is_some_and(|labels| labels.contains_key("container_id"));
+        if labelled || container_from_cgroup_path(&name).is_some() {
+            containers.insert(entity_id);
+        }
+    }
+    Ok(containers)
+}
+
+/// Coverage of the 1-minute rollups inside a window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct RollupCoverage {
+    /// Distinct entities with at least one bucket.
+    pub entities: u64,
+    /// Rollup rows in the window.
+    pub buckets: u64,
+    /// First bucket start.
+    pub from_wall_ns: Option<i64>,
+    /// Last bucket start.
+    pub to_wall_ns: Option<i64>,
+}
+
+/// How much rollup data a window actually contains.
+///
+/// Peak detection reads rollups only, so "no peaks" must be distinguishable from
+/// "no data": this is what lets `sarf peaks` say which one it is.
+pub fn rollup_coverage(conn: &Connection, window: Window) -> Result<RollupCoverage> {
+    let mut statement = conn
+        .prepare(
+            "SELECT COUNT(DISTINCT entity_id), COUNT(*), MIN(bucket_wall_ns), MAX(bucket_wall_ns)
+               FROM rollup_1m
+              WHERE bucket_wall_ns >= ?1 AND bucket_wall_ns < ?2",
+        )
+        .map_err(db_err)?;
+    let (entities, buckets, from, to) = statement
+        .query_row(params![window.since, window.until], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .map_err(db_err)?;
+    Ok(RollupCoverage {
+        entities: entities.max(0) as u64,
+        buckets: buckets.max(0) as u64,
+        from_wall_ns: from,
+        to_wall_ns: to,
+    })
 }
 
 /// Newest stored raw host sample timestamp, or `None` when nothing is stored.

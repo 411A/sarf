@@ -287,7 +287,7 @@ fn store_size(data_dir: &crate::paths::DataDir) -> u64 {
 }
 
 /// Database and collector status.
-pub fn status(context: &Context) -> Result<i32> {
+pub fn status(context: &Context, brief: bool) -> Result<i32> {
     let store = match context.open_read() {
         Ok(store) => store,
         Err(err) => {
@@ -330,6 +330,29 @@ pub fn status(context: &Context) -> Result<i32> {
         "integrations": integrations,
         "open_gaps": gaps.iter().filter(|gap| gap.resolved_wall_ns.is_none()).count(),
     });
+    if brief {
+        // Compact, agent-oriented status: no collector or integration tables.
+        let brief = serde_json::json!({
+            "schema": "sarf.status",
+            "v": 1,
+            "hostname": stats.hostname,
+            "kernel": stats.kernel_release,
+            "architecture": stats.architecture,
+            "schema_version": store.schema_version()?,
+            "earliest": stats.earliest_wall_ns,
+            "latest": stats.latest_wall_ns,
+            "latest_age_ns": stats.latest_wall_ns.map(|latest| context.now.saturating_sub(latest)),
+            "stale": status_is_stale(stats.latest_wall_ns, context),
+            "database_bytes": usage.database,
+            "wal_bytes": usage.wal,
+            "total_bytes": usage.total(),
+            "open_gaps": gaps.iter().filter(|gap| gap.resolved_wall_ns.is_none()).count(),
+            "counts": stats.counts,
+            "runs": runs,
+        });
+        print_json(&brief)?;
+        return Ok(0);
+    }
     if context.json {
         print_json(&payload)?;
         return Ok(0);

@@ -16,7 +16,7 @@
 //! are `on` (runs on that host/cgroup) and `in` (process is contained in that
 //! cgroup). `own` is only computed where containment makes it meaningful.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -225,6 +225,11 @@ pub struct PeakDocument {
     pub until_wall_ns: i64,
     /// Number of peaks in this document.
     pub peak_count: usize,
+    /// Rollup data actually available in the window.
+    pub coverage: query::RollupCoverage,
+    /// Why the document is empty, when it is (never leave zero ambiguous).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Peaks, highest score first.
     pub peaks: Vec<PeakDossier>,
 }
@@ -242,6 +247,11 @@ pub struct StoredPeakDocument {
     pub until_wall_ns: i64,
     /// Number of stored peaks in this document.
     pub peak_count: usize,
+    /// Rollup data actually available in the window.
+    pub coverage: query::RollupCoverage,
+    /// Why the document is empty, when it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Stored dossier payloads, oldest first.
     pub peaks: Vec<serde_json::Value>,
 }
@@ -467,10 +477,20 @@ struct RawPeak {
 ///
 /// Only entities with rollup rows are considered; a metric that is missing for
 /// a bucket is skipped (never treated as zero).
-fn detect(conn: &Connection, window: Window, policy: &PeakPolicy) -> Result<Vec<RawPeak>> {
+fn detect(
+    conn: &Connection,
+    window: Window,
+    policy: &PeakPolicy,
+    containers: Option<&BTreeSet<String>>,
+) -> Result<Vec<RawPeak>> {
     let mut peaks = Vec::new();
     let baseline_from = window.since.saturating_sub(policy.baseline_ns);
     for (entity_id, entity_kind) in query::rollup_entities(conn, window)? {
+        if let Some(containers) = containers {
+            if entity_kind != "cgroup" || !containers.contains(&entity_id) {
+                continue;
+            }
+        }
         let points =
             query::rollup_series(conn, &entity_id, Window::new(baseline_from, window.until))?;
         if points.len() < MIN_HISTORY {
@@ -655,9 +675,10 @@ pub fn build_dossiers(
     conn: &Connection,
     window: Window,
     policy: &PeakPolicy,
+    containers: Option<&BTreeSet<String>>,
 ) -> Result<Vec<PeakDossier>> {
     let host = query::host_entity(conn)?;
-    let detected = detect(conn, window, policy)?;
+    let detected = detect(conn, window, policy, containers)?;
     let mut dossiers = Vec::new();
     for raw in &detected {
         dossiers.push(build_dossier(conn, raw, &detected, host.as_ref(), policy)?);
@@ -666,16 +687,51 @@ pub fn build_dossiers(
 }
 
 /// Build the complete document for `window`.
-pub fn document(conn: &Connection, window: Window, policy: &PeakPolicy) -> Result<PeakDocument> {
-    let peaks = build_dossiers(conn, window, policy)?;
+pub fn document(
+    conn: &Connection,
+    window: Window,
+    policy: &PeakPolicy,
+    containers: Option<&BTreeSet<String>>,
+) -> Result<PeakDocument> {
+    let peaks = build_dossiers(conn, window, policy, containers)?;
+    let coverage = query::rollup_coverage(conn, window)?;
+    let note = empty_note(coverage, peaks.len(), containers);
     Ok(PeakDocument {
         schema: PEAK_SCHEMA,
         v: PEAK_SCHEMA_VERSION,
         since_wall_ns: window.since,
         until_wall_ns: window.until,
         peak_count: peaks.len(),
+        coverage,
+        note,
         peaks,
     })
+}
+
+/// Explain an empty document instead of returning a bare zero.
+fn empty_note(
+    coverage: query::RollupCoverage,
+    peak_count: usize,
+    containers: Option<&BTreeSet<String>>,
+) -> Option<String> {
+    if coverage.entities == 0 {
+        return Some(
+            "no 1-minute rollups in this window: the collector was not running. Use a wider --since"
+                .to_string(),
+        );
+    }
+    if peak_count == 0 {
+        let scope = if containers.is_some() {
+            " for container cgroups"
+        } else {
+            ""
+        };
+        return Some(format!(
+            "{} entities have rollups in this window but no bucket exceeded its rolling baseline{scope}",
+            coverage.entities
+        ));
+    }
+    None
 }
 
 /// Assemble a document from stored dossiers (survives raw-data expiry).
@@ -683,9 +739,15 @@ pub fn stored_document(
     conn: &Connection,
     window: Window,
     limit: usize,
+    containers: Option<&BTreeSet<String>>,
 ) -> Result<StoredPeakDocument> {
     let mut peaks = Vec::new();
     for stored in query::stored_peaks(conn, window, limit)? {
+        if let Some(containers) = containers {
+            if !containers.contains(&stored.scope_entity_id) {
+                continue;
+            }
+        }
         match serde_json::from_str::<serde_json::Value>(&stored.payload_json) {
             Ok(value) => peaks.push(value),
             // A truncated or older payload is reported, never silently dropped.
@@ -698,12 +760,16 @@ pub fn stored_document(
             })),
         }
     }
+    let coverage = query::rollup_coverage(conn, window)?;
+    let note = empty_note(coverage, peaks.len(), containers);
     Ok(StoredPeakDocument {
         schema: PEAK_SCHEMA,
         v: PEAK_SCHEMA_VERSION,
         since_wall_ns: window.since,
         until_wall_ns: window.until,
         peak_count: peaks.len(),
+        coverage,
+        note,
         peaks,
     })
 }
@@ -718,8 +784,9 @@ pub fn merged_document(
     window: Window,
     policy: &PeakPolicy,
     stored_limit: usize,
+    containers: Option<&BTreeSet<String>>,
 ) -> Result<serde_json::Value> {
-    let live = document(conn, window, policy)?;
+    let live = document(conn, window, policy, containers)?;
     let mut peaks: Vec<serde_json::Value> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for dossier in &live.peaks {
@@ -730,6 +797,11 @@ pub fn merged_document(
         );
     }
     for stored in query::stored_peaks(conn, window, stored_limit)? {
+        if let Some(containers) = containers {
+            if !containers.contains(&stored.scope_entity_id) {
+                continue;
+            }
+        }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&stored.payload_json) else {
             continue;
         };
@@ -761,12 +833,16 @@ pub fn merged_document(
                     .cmp(&right.get("metric").and_then(serde_json::Value::as_str))
             })
     });
+    let coverage = query::rollup_coverage(conn, window)?;
+    let note = empty_note(coverage, peaks.len(), containers);
     Ok(serde_json::json!({
         "schema": PEAK_SCHEMA,
         "v": PEAK_SCHEMA_VERSION,
         "since_wall_ns": window.since,
         "until_wall_ns": window.until,
         "peak_count": peaks.len(),
+        "coverage": coverage,
+        "note": note,
         "peaks": peaks,
     }))
 }
@@ -1550,8 +1626,8 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO entities(entity_id, kind, stable_key, name, source, first_seen_wall_ns, last_seen_wall_ns)
-             VALUES ('cgroup:1:20','cgroup','20:1','utazbot_tgbot','cgroup',?1,?1)",
+            "INSERT INTO entities(entity_id, kind, stable_key, name, source, labels_json, first_seen_wall_ns, last_seen_wall_ns)
+             VALUES ('cgroup:1:20','cgroup','20:1','utazbot_tgbot','cgroup','{\"container_id\":\"7ed4aa8bf4c7\"}',?1,?1)",
             rusqlite::params![base],
         )
         .unwrap();
@@ -1635,7 +1711,7 @@ mod tests {
         let base = 1_600_000_000_000_000_000i64;
         seed(&store, base);
         let window = Window::new(base, base + 86 * MINUTE_NS);
-        let document = document(store.connection(), window, &policy()).expect("document");
+        let document = document(store.connection(), window, &policy(), None).expect("document");
 
         assert_eq!(document.schema, PEAK_SCHEMA);
         let peak = document
@@ -1796,16 +1872,58 @@ mod tests {
     }
 
     #[test]
+    fn container_filter_reports_only_container_scopes() {
+        let store = Store::open_in_memory().expect("store");
+        let base = 1_600_000_000_000_000_000i64;
+        seed(&store, base);
+        let window = Window::new(base, base + 86 * MINUTE_NS);
+        let containers = query::container_entities(store.connection()).expect("containers");
+        assert!(containers.contains("cgroup:1:20"));
+
+        let filtered = document(store.connection(), window, &policy(), Some(&containers))
+            .expect("container document");
+        assert!(!filtered.peaks.is_empty());
+        assert!(filtered
+            .peaks
+            .iter()
+            .all(|peak| peak.scope.starts_with("cgroup:")));
+        assert!(filtered.peaks.iter().any(|peak| peak.metric == "cpu"));
+
+        // The same window without the filter also reports host-scoped peaks.
+        let all = document(store.connection(), window, &policy(), None).expect("all");
+        assert!(all.peaks.iter().any(|peak| peak.scope == "host:a"));
+    }
+
+    #[test]
+    fn an_empty_window_explains_itself() {
+        let store = Store::open_in_memory().expect("store");
+        let base = 1_600_000_000_000_000_000i64;
+        seed(&store, base);
+        let far = Window::new(base + 1_000 * 60 * MINUTE_NS, base + 1_100 * 60 * MINUTE_NS);
+        let doc = document(store.connection(), far, &policy(), None).expect("empty");
+        assert_eq!(doc.peak_count, 0);
+        assert_eq!(doc.coverage.entities, 0);
+        assert!(
+            doc.note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no 1-minute rollups"),
+            "note: {:?}",
+            doc.note
+        );
+    }
+
+    #[test]
     fn peak_json_is_compact_and_deterministic() {
         let store = Store::open_in_memory().expect("store");
         let base = 1_600_000_000_000_000_000i64;
         seed(&store, base);
         let window = Window::new(base, base + 86 * MINUTE_NS);
         let first =
-            serde_json::to_string(&document(store.connection(), window, &policy()).unwrap())
+            serde_json::to_string(&document(store.connection(), window, &policy(), None).unwrap())
                 .expect("json");
         let second =
-            serde_json::to_string(&document(store.connection(), window, &policy()).unwrap())
+            serde_json::to_string(&document(store.connection(), window, &policy(), None).unwrap())
                 .expect("json");
         assert_eq!(first, second, "peak JSON must be deterministic");
         // Compact: no indentation, no NaN/Infinity, no unknown-key padding.
@@ -1822,7 +1940,8 @@ mod tests {
         let base = 1_600_000_000_000_000_000i64;
         seed(&store, base);
         let window = Window::new(base, base + 86 * MINUTE_NS);
-        let dossiers = build_dossiers(store.connection(), window, &policy()).expect("dossiers");
+        let dossiers =
+            build_dossiers(store.connection(), window, &policy(), None).expect("dossiers");
         assert!(!dossiers.is_empty());
         let mut items = Vec::new();
         for dossier in &dossiers {
@@ -1836,6 +1955,7 @@ mod tests {
             store.connection(),
             Window::new(base, base + 120 * MINUTE_NS),
             100,
+            None,
         )
         .expect("stored");
         assert_eq!(stored.peak_count, dossiers.len());
@@ -1898,6 +2018,7 @@ mod tests {
             store.connection(),
             Window::new(now - 100 * 60 * MINUTE_NS, now + MINUTE_NS),
             10,
+            None,
         )
         .unwrap();
         assert_eq!(remaining.peak_count, 1);

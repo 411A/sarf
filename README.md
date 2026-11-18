@@ -171,7 +171,7 @@ test suite; they are measurements, not guarantees. See `docs/TESTING.md`.
 ```text
 sarf init [--force]
 sarf run [--config PATH] [--cycles N] [--fixture-root PATH] [--simulate] [--interval-secs N]
-sarf doctor | status | capabilities | gaps
+sarf doctor | status [--brief] | capabilities | gaps
 sarf top [--since 1h] [--by cpu|mem|net|io] [--limit N]
 sarf processes [--since 1h] [--filter TEXT]
 sarf tree [--since 1h] [--process ID] [--service NAME]
@@ -183,7 +183,7 @@ sarf logs <source|all> [--since 1h] [--grep TEXT] [--level warn]
 sarf report|graph [--since 1h] [--output PATH] [--incident ID] [--service NAME]
 sarf export [--since 24h] [--format csv|json] [--output PATH]
 sarf prune
-sarf peaks [--since 72h] [--stored] [--output PATH]   # machine peak dossiers for agents
+sarf peaks [--since 72h] [--containers] [--stored] [--output PATH]   # machine peak dossiers
 sarf benchmark [--cycles N] [--fixture-root PATH]
 sarf tools list|show ID|search QUERY
 ```
@@ -230,6 +230,16 @@ It answers "what was consuming the host, and what is related to it?":
   daemon stored — deduplicated by id. Nothing is streamed or split; the payload is
   about **1.5–2 KB per peak** (a 10-peak hour is ~20 KB), which fits an agent
   context directly.
+- **Container-only focus.** `--containers` restricts detection to cgroups that belong
+  to a container (catalog `container_id` label or a docker/containerd/k8s/CRI-O
+  cgroup path), so host and system-unit peaks never appear. Stored dossiers are
+  filtered the same way, and the graph still roots at the host so `share` stays
+  meaningful.
+- **Zero is never ambiguous.** Every document carries `coverage`
+  (`entities`, `buckets`, `from_wall_ns`, `to_wall_ns`); an empty document also
+  carries `note`, e.g. *"no 1-minute rollups in this window: the collector was not
+  running. Use a wider --since"*. A 0 with rollups present means nothing crossed its
+  baseline, not that data was missing.
 - **72-hour retention.** The daemon detects peaks on its retention cadence and stores
   compact dossiers in `peak_dossiers` (`[peaks].retain_hours`, default 72). They stay
   readable after raw samples expire; `--stored` dumps them alone for debugging.

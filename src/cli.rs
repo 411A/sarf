@@ -49,7 +49,11 @@ pub enum Command {
     /// Check kernel, /proc, cgroup, permissions, database and optional tools.
     Doctor,
     /// Show database size, row counts, latest run and collector state.
-    Status,
+    Status {
+        /// Compact JSON: freshness, storage and gaps only (no collector table).
+        #[arg(long)]
+        brief: bool,
+    },
     /// Show detected kernel/runtime capabilities and known gaps.
     Capabilities,
     /// List open and resolved coverage gaps.
@@ -190,6 +194,9 @@ pub enum Command {
         /// Window to analyse.
         #[arg(long, default_value = "72h")]
         since: String,
+        /// Only container cgroups (Docker/containerd/k8s), never host or system units.
+        #[arg(long)]
+        containers: bool,
         /// Read dossiers stored by the daemon instead of detecting now.
         #[arg(long)]
         stored: bool,

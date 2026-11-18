@@ -712,7 +712,10 @@ pub fn run(options: DaemonOptions) -> Result<RunReport> {
         let pulse = engine.tick(stamps.wall);
         enqueue_incidents(&mut batch, pulse, &logs, &stamps, &mut report);
 
-        if run_prune && cycle > 0 {
+        // Retention and peak detection run on the first cycle too: a restart
+        // after a long outage must not wait five minutes before reclaiming space
+        // or storing the peaks that are still inside the rollup window.
+        if run_prune {
             prune(&options, &writer, stamps.wall, &mut health);
         }
         if sample_discovery {
@@ -1793,7 +1796,7 @@ fn prune(
     if options.config.peaks.enabled {
         let peaks = crate::analysis::peaks::PeakPolicy::from_config(&options.config);
         let window = Window::new(now_wall_ns.saturating_sub(peaks.detect_ns), now_wall_ns);
-        match crate::analysis::peaks::build_dossiers(store.connection(), window, &peaks) {
+        match crate::analysis::peaks::build_dossiers(store.connection(), window, &peaks, None) {
             Ok(dossiers) if !dossiers.is_empty() => {
                 let mut items = Vec::with_capacity(dossiers.len());
                 for dossier in &dossiers {

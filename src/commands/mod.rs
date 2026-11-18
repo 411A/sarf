@@ -302,7 +302,7 @@ pub fn main() -> Result<i32> {
         Command::Install(_) => unreachable!("install is dispatched before context creation"),
         Command::Run(args) => system::run_daemon(&context, args),
         Command::Doctor => system::doctor(&context),
-        Command::Status => system::status(&context),
+        Command::Status { brief } => system::status(&context, *brief),
         Command::Capabilities => system::capabilities(&context),
         Command::Gaps => system::gaps(&context),
         Command::Top { since, by, limit } => query::top(&context, since, *by, *limit),
@@ -367,9 +367,10 @@ pub fn main() -> Result<i32> {
         Command::Prune => system::prune(&mut context),
         Command::Peaks {
             since,
+            containers,
             stored,
             output,
-        } => query::peaks(&context, since, *stored, output.as_deref()),
+        } => query::peaks(&context, since, *containers, *stored, output.as_deref()),
         Command::Benchmark {
             cycles,
             fixture_root,

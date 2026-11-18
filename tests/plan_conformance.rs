@@ -42,6 +42,7 @@ fn every_documented_command_parses() {
         &["sarf", "run", "--fixture-root", "fixture"],
         &["sarf", "doctor"],
         &["sarf", "status"],
+        &["sarf", "status", "--brief"],
         &["sarf", "capabilities"],
         &["sarf", "gaps"],
         &[
@@ -67,6 +68,7 @@ fn every_documented_command_parses() {
         &["sarf", "export", "--format", "json"],
         &["sarf", "prune"],
         &["sarf", "peaks", "--since", "72h"],
+        &["sarf", "peaks", "--containers", "--since", "72h"],
         &[
             "sarf",
             "peaks",

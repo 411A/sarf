@@ -590,6 +590,25 @@ Schema v3:
 Result: ~1.5-2 KB per peak (measured 6.8 KB for a 4-peak fixture), a 10-peak hour is
 about 20 KB. `max_peaks` defaults to 10 and `max_nodes` to 8.
 
+### Amendment 3 - container focus, honest zero, and a first-cycle prune
+
+Three field findings from a 10-container host:
+
+- **The peaks pass never ran in the first ~5 minutes.** `due()` consumed the prune
+  schedule on the first cycle, but the action was gated by `cycle > 0`, so the first
+  real pass waited for the next 300 s tick. Retention and peak detection now run on
+  the first cycle: a restart reclaims space and stores peaks immediately.
+- **`peak_count: 0` was ambiguous.** The window was a real outage (no rollups), not a
+  quiet host. Every peak document now carries `coverage {entities, buckets, from, to}`
+  and, when empty, a `note` that says whether there was no data or no peak.
+- **No container-only view.** `sarf peaks --containers` restricts detection to cgroups
+  that belong to a container (catalog `container_id` or a container cgroup path) and
+  filters stored dossiers by the same rule. The graph still roots at the host, so
+  `share` remains a fraction of the host.
+- **`status --brief`** returns only freshness, storage, gaps, counts and runs
+  (~1.5 KB instead of ~19 KB with the collector and integration tables).
+
+
 
 
 

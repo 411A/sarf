@@ -904,17 +904,24 @@ fn story_value(metric: &str, value: f64) -> String {
 pub fn peaks(
     context: &Context,
     since: &str,
+    containers_only: bool,
     stored: bool,
     output: Option<&std::path::Path>,
 ) -> Result<i32> {
     let store = context.open_read()?;
     let window = context.window(since)?;
     let policy = peaks_analysis::PeakPolicy::from_config(&context.config);
+    let containers = if containers_only {
+        Some(query::container_entities(store.connection())?)
+    } else {
+        None
+    };
     let text = if stored {
         serde_json::to_string(&peaks_analysis::stored_document(
             store.connection(),
             window,
             10_000,
+            containers.as_ref(),
         )?)
     } else if policy.enabled {
         // One document, everything at once: fresh detection merged with the
@@ -924,6 +931,7 @@ pub fn peaks(
             window,
             &policy,
             10_000,
+            containers.as_ref(),
         )?)
     } else {
         // Disabled is not "no peaks": say so explicitly instead of emitting [].
