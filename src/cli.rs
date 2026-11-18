@@ -210,6 +210,27 @@ pub enum Command {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
+    /// Profile CPU self time of a container's live processes (Linux).
+    ///
+    /// Runs external `perf` for a bounded interval and reports the symbols that
+    /// consumed CPU. This is deliberate: a BPF loader would need libbpf, kernel
+    /// headers and `unsafe`, while `perf` is an ordinary read-only command. The
+    /// answer is self time by symbol, never a call graph, and the command says
+    /// "unavailable" when the host lacks perf or forbids sampling.
+    Profile {
+        /// Container name or id as recorded by SARF (`top --containers`).
+        #[arg(long, required_unless_present = "pid")]
+        container: Option<String>,
+        /// Live PID to profile instead of a container.
+        #[arg(long, required_unless_present = "container", value_parser = clap::value_parser!(u32).range(1..))]
+        pid: Option<u32>,
+        /// Sampling duration in seconds.
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// Sampling frequency in Hz.
+        #[arg(long, default_value_t = 999)]
+        hz: u64,
+    },
     /// Measure bounded collection and database write throughput.
     Benchmark {
         /// Cycles to measure.

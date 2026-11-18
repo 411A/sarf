@@ -184,6 +184,8 @@ sarf report|graph [--since 1h] [--output PATH] [--incident ID] [--service NAME]
 sarf export [--since 24h] [--format csv|json] [--output PATH]
 sarf prune
 sarf peaks [--since 72h] [--containers] [--csv] [--stored] [--output PATH]   # machine peak dossiers
+sarf profile --container NAME [--seconds 30] [--hz 999]                     # function-level self time (perf)
+sarf profile --pid PID [--seconds 30] [--hz 999]
 sarf benchmark [--cycles N] [--fixture-root PATH]
 sarf tools list|show ID|search QUERY
 ```
@@ -269,8 +271,8 @@ It answers "what was consuming the host, and what is related to it?":
   Both come from the same document, so they cannot disagree.
 
 ```json
-{"schema":"sarf.peak","v":3,"peak_count":1,
- "peaks":[{"v":3,"id":"host:a|cpu|1700000000000000000","metric":"cpu","scope":"host:a",
+{"schema":"sarf.peak","v":4,"peak_count":1,
+ "peaks":[{"v":4,"id":"host:a|cpu|1700000000000000000","metric":"cpu","scope":"host:a",
            "shape":"sustained","peak":96.0,"base":8.0,"p99":9.0,"score":10.67,
            "nodes":[{"id":"host:a","name":"nila","kind":"host","value":96.0,"share":1.0,
                      "base":8.0,"series":[8.0,8.0,9.0,96.0,95.0,null,8.0]},
@@ -297,10 +299,48 @@ can order evidence without parsing timestamps. `node` is an index into `nodes`;
 it is omitted when a line or event cannot be attributed. Every list is bounded and
 deterministic: 8 log lines, 10 events, 4 neighbours, 8 nodes, 12 series points.
 
-What it does **not** claim: stack-level or instruction-level attribution. There is no
-eBPF/perf sampling, so the graph explains which host/cgroup/process carried the cost,
-not which function inside it did. Turning that on later is additive: a node would gain
-a `frames` array without changing the rest of the document.
+What it does **not** claim: stack-level or instruction-level attribution. The peak
+document explains which host/cgroup/process carried the cost, not which function
+inside it did — that is a separate command, `sarf profile`, because it has to sample
+live processes rather than read stored rollups.
+
+## Function-level cost (`sarf profile`)
+
+Peaks say *which* service is expensive; `sarf profile` says *which function* inside
+it is. It samples the container's live processes with external `perf` and prints one
+JSON document:
+
+```bash
+sarf --data-dir /var/lib/sarf profile --container utazbot_tgbot --seconds 30
+sarf profile --pid 4242 --seconds 10 --hz 999
+```
+
+```json
+{"schema":"sarf.profile","v":1,"status":"ok","container":"utazbot_tgbot",
+ "pids":[4242,4243],"seconds":30,"hz":999,
+ "top":[{"pct":45.67,"comm":"python3.12","dso":"libpython3.12.so.1.0",
+         "symbol":"_PyEval_EvalFrameDefault"}]}
+```
+
+- **Self time, not a call graph.** Frame pointers are absent in most release builds
+  and DWARF unwinding would cost more than the daemon, so the answer is a flat
+  ranking of what consumed CPU. That is the right first question ("which function
+  is expensive?"), not the last one ("who called it?").
+- **External `perf`, never BPF.** A BPF loader needs libbpf, kernel headers and
+  `unsafe`, none of which this binary accepts, and a Python workload would still
+  resolve to `_PyEval_EvalFrameDefault`. `perf` is an ordinary bounded command, so
+  a host without it gets `"status":"unavailable"` with a hint — never an empty
+  ranking that reads as "no CPU used".
+- **What it cannot see.** Symbols are native: CPython frames collapse into the
+  interpreter loop, so a Python-level hotspot needs `py-spy`-style unwinding, which
+  SARF does not bundle. Stripped binaries show addresses and say so.
+- **Requirements.** `perf` installed for the running kernel and
+  `/proc/sys/kernel/perf_event_paranoid` at `1` or lower (root, or user-space
+  counting at `2`). Inside a container the `perf_event_open` syscall must also be
+  allowed by its seccomp profile.
+- **Bounded.** At most 32 PIDs, 120 s and 4 kHz; PIDs must be live or have ended in
+  the last 15 minutes, so a restarted container's reused PID is not sampled. The
+  temporary `perf.data` is deleted before exit.
 
 ## Reading the output
 

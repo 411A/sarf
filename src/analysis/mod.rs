@@ -19,6 +19,10 @@
 //!   idle is not an error).
 //! * [`correlation`] turns stored buckets into high/low [`crate::model::AttributionWindow`]s
 //!   with ranked contributors, host context and bounded evidence lines.
+//! * [`profile`] parses `perf report` output into self-time symbols, which is the
+//!   only view that names a *function* rather than a process. It shells out to
+//!   `perf` instead of loading BPF programs: no libbpf, no kernel headers, no
+//!   `unsafe`, and an honest "unavailable" when the host forbids sampling.
 //!
 //! All three are pure read-side building blocks: they never write to the database,
 //! never block on collection, and every returned collection or JSON document is
@@ -28,4 +32,5 @@ pub mod correlation;
 pub mod ewma;
 pub mod incidents;
 pub mod peaks;
+pub mod profile;
 pub mod story;

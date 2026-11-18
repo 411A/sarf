@@ -656,10 +656,47 @@ expensive to run:
   exceptional rows, so a 24 h query returns ten peaks, not thirty, while the CSV
   carries `period_s` for scanning.
 - **CSV shrank.** `id` was dropped (derivable from scope+metric+start) and timestamps
-  are seconds, since buckets are minute-aligned: 17 columns, about 60 bytes per peak.
+  are seconds, since buckets are minute-aligned: 18 columns, about 60 bytes per peak.
 
+## ADR-026 - Function-level cost uses external `perf`, not eBPF
 
+**Context.** A peak dossier can say that `utazbot_tgbot` carried 70 % of a core for
+eight minutes, and `work` says which log line repeats. It cannot say which function
+inside the service burns that CPU, so a coding agent still has to guess.
 
+**Options.**
 
+1. eBPF with libbpf: precise, but requires a BPF program loader, kernel headers,
+   a build-time dependency and `unsafe`, which the crate denies except for the
+   documented `clock_gettime` wrapper. It also would not name Python frames: a
+   stack walk still bottoms out in `_PyEval_EvalFrameDefault`.
+2. DTrace/SystemTap: same dependency and privilege problem, plus a runtime
+   translator.
+3. External `perf record`/`perf report`: no new dependency, no unsafe, bounded like
+   docker/tmux, and it reports self time by symbol. It fails honestly on hosts that
+   forbid sampling.
+
+**Decision.** Option 3. `sarf profile --container NAME` (or `--pid PID`) resolves
+live PIDs from `process_lifetimes` (live, or ended in the last 15 minutes, at most
+32), runs `perf record -q -F <hz> -p <pids> -o <temp> -- sleep <seconds>`, then
+`perf report -i <temp> --stdio --percent-limit 0.5 --sort overhead,comm,dso,symbol`,
+parses the table, deletes the temp file and prints one `sarf.profile` JSON document.
+Bounds: 1-120 s, 10-4000 Hz, 20 symbols, 1 MiB report output, 60 s report timeout.
+
+**Consequences.**
+
+- The answer is *self time by symbol*, not a call graph. Frame pointers are missing
+  in most release builds, and DWARF unwinding would cost more than the daemon.
+- Symbols are native. CPython work collapses into `_PyEval_EvalFrameDefault`;
+  Python-level frames need `py-spy`-style unwinding, which is not bundled.
+- `perf` must be installed and `/proc/sys/kernel/perf_event_paranoid` must be `<= 1`
+  (or `<= 2` for user-space counting). In a container the seccomp profile must allow
+  `perf_event_open`. Every failure becomes `"status":"unavailable"` with a reason
+  and a hint; `top` is omitted, never an empty array that reads as zero CPU.
+- Nothing is written to the monitored process: `perf` samples it, exactly as the
+  `cpu-clock` event always has. SARF itself remains read-only.
+- This is separate from `sarf peaks` on purpose: peaks read stored rollups and are
+  reproducible after the fact; a profile is a live sample with a duration. Merging
+  them would make the peak document non-deterministic.
 
 

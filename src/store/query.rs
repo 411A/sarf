@@ -1768,6 +1768,49 @@ pub fn entity_labels(conn: &Connection, entity_id: &str) -> Result<BTreeMap<Stri
         .unwrap_or_default())
 }
 
+/// Live PIDs that belong to a container, most recently started first, bounded.
+///
+/// A process belongs to the container when its recorded `container` name matches
+/// or when its cgroup is a cgroup entity with that name. Only processes that are
+/// still running or that ended inside `window` are considered, so a restarted
+/// container's dead PIDs are never sampled by mistake.
+pub fn container_pids(
+    conn: &Connection,
+    container: &str,
+    window: Window,
+    limit: usize,
+) -> Result<Vec<u32>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT host_pid, MAX(start_wall_ns)
+               FROM process_lifetimes
+              WHERE host_pid > 0
+                AND (end_wall_ns IS NULL OR end_wall_ns >= ?2)
+                AND (container = ?1
+                     OR cgroup_entity_id IN (
+                         SELECT entity_id FROM entities
+                          WHERE kind = 'cgroup' AND name = ?1))
+              GROUP BY host_pid
+              ORDER BY MAX(start_wall_ns) DESC
+              LIMIT ?3",
+        )
+        .map_err(db_err)?;
+    let mut rows = statement
+        .query(params![container, window.since, limit.clamp(1, 128) as i64])
+        .map_err(db_err)?;
+    let mut pids = Vec::new();
+    while let Some(row) = rows.next().map_err(db_err)? {
+        let pid = row.get::<_, i64>(0).map_err(db_err)?;
+        if pid > 0 {
+            pids.push(pid as u32);
+        }
+    }
+    // perf wants a stable comma list; ascending order also makes the document
+    // byte-identical between runs over the same process set.
+    pids.sort_unstable();
+    Ok(pids)
+}
+
 /// Entity ids of cgroups that belong to a container.
 ///
 /// A cgroup is a container when the catalog labelled it with `container_id` or
@@ -2681,6 +2724,87 @@ mod tests {
             lifetimes(store.connection(), Window::new(now - 1000, now), 10).expect("lifetimes");
         assert_eq!(lifetimes.len(), 1);
         assert_eq!(lifetimes[0].role.as_deref(), Some("nginx worker"));
+    }
+
+    #[test]
+    fn container_pids_selects_only_live_processes_of_that_container() {
+        use crate::store::ProcessLifetimeRow;
+
+        let now = 1_000 * 1_000_000_000;
+        let mut store = Store::open_in_memory().expect("store");
+        let lifetime = |id: &str,
+                        pid: u32,
+                        container: Option<&str>,
+                        cgroup: Option<&str>,
+                        start_wall_ns: i64| {
+            WriteItem::normal(WriteRecord::ProcessLifetime(ProcessLifetimeRow {
+                process_instance_id: id.to_string(),
+                host_id: "h".into(),
+                host_pid: pid,
+                start_ticks: 1,
+                parent_process_instance_id: None,
+                parent_host_pid: None,
+                executable: Some("/usr/local/bin/python3.12".into()),
+                comm: "python3.12".into(),
+                tool: None,
+                role: None,
+                unit: None,
+                container: container.map(str::to_string),
+                session: None,
+                cgroup_entity_id: cgroup.map(str::to_string),
+                start_wall_ns,
+                start_mono_ns: 1,
+            }))
+        };
+        store
+            .write(&[
+                WriteItem::normal(WriteRecord::Entity(crate::model::Entity {
+                    entity_id: "cgroup:1:20".into(),
+                    kind: EntityKind::Cgroup,
+                    stable_key: "20:1".into(),
+                    name: "utazbot_tgbot".into(),
+                    source: "cgroup_v2".into(),
+                    labels: std::iter::once((
+                        "container_id".to_string(),
+                        "7ed4aa8bf4c7".to_string(),
+                    ))
+                    .collect(),
+                    first_seen_wall_ns: now,
+                    last_seen_wall_ns: now,
+                })),
+                // Matched by the recorded container name.
+                lifetime("p1", 101, Some("utazbot_tgbot"), None, now - 2),
+                // Matched through its cgroup, whose name is the container.
+                lifetime("p2", 202, None, Some("cgroup:1:20"), now - 3),
+                // Different container: must never be sampled.
+                lifetime("p3", 303, Some("utazbot_redis"), None, now - 1),
+                // Ended before the window: its PID may already be reused.
+                lifetime("p4", 404, Some("utazbot_tgbot"), None, now - 90),
+                WriteItem::normal(WriteRecord::ProcessLifetimeEnd {
+                    process_instance_id: "p4".into(),
+                    end_wall_ns: now - 60,
+                    end_mono_ns: 2,
+                    reason: "exited".into(),
+                }),
+            ])
+            .expect("write");
+        let pids = container_pids(
+            store.connection(),
+            "utazbot_tgbot",
+            Window::new(now - 30, now),
+            32,
+        )
+        .expect("pids");
+        assert_eq!(pids, vec![101, 202]);
+        // The limit is a bound, not a suggestion.
+        let bounded = container_pids(
+            store.connection(),
+            "utazbot_tgbot",
+            Window::new(now - 30, now),
+            1,
+        )
+        .expect("pids");
+        assert_eq!(bounded.len(), 1);
     }
 
     #[test]

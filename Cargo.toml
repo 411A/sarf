@@ -1,6 +1,6 @@
 [package]
 name = "sarf"
-version = "0.1.18"
+version = "0.1.19"
 edition = "2021"
 rust-version = "1.88"
 description = "SARF — lightweight Linux process, service and activity forensics"

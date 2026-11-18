@@ -384,6 +384,12 @@ pub fn main() -> Result<i32> {
             *csv,
             output.as_deref(),
         ),
+        Command::Profile {
+            container,
+            pid,
+            seconds,
+            hz,
+        } => query::profile(&context, container.as_deref(), *pid, *seconds, *hz),
         Command::Benchmark {
             cycles,
             fixture_root,

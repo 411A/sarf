@@ -1,14 +1,18 @@
 //! Read-side query commands: top, processes, tree, why, incidents, show, logs.
 
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::analysis::{correlation, peaks as peaks_analysis, story as story_analysis};
+use crate::analysis::{
+    correlation, peaks as peaks_analysis, profile as profile_analysis, story as story_analysis,
+};
 use crate::cli::ByMetric;
 use crate::commands::{
     fmt_bytes, fmt_clock, fmt_pct, fmt_span, fmt_time, print_json, print_table, Context,
 };
+use crate::enrich;
 use crate::error::{Error, Result};
 use crate::model::{EntityKind, Metric, Severity};
 use crate::store::query::{self, EventFilter, LogFilter, Window};
@@ -983,6 +987,207 @@ pub fn peaks(
         }
         None => print!("{text}"),
     }
+    Ok(0)
+}
+
+/// Bounded sampling of a container's live processes with external `perf`.
+///
+/// The answer is self time by symbol: what consumed CPU, not what called it.
+/// No BPF program is loaded and no process is written to; `perf` only samples
+/// the listed PIDs for a bounded interval.
+pub fn profile(
+    context: &Context,
+    container: Option<&str>,
+    pid: Option<u32>,
+    seconds: u64,
+    hz: u64,
+) -> Result<i32> {
+    let seconds = seconds.clamp(1, PROFILE_MAX_SECONDS);
+    let hz = hz.clamp(10, PROFILE_MAX_HZ);
+    let (container, pids) = match (container, pid) {
+        (Some(name), _) => {
+            let store = context.open_read()?;
+            let window = context.window(PROFILE_PID_WINDOW)?;
+            let pids = query::container_pids(
+                store.connection(),
+                name,
+                window,
+                profile_analysis::MAX_PIDS,
+            )?;
+            (Some(name.to_string()), pids)
+        }
+        (None, Some(pid)) => (None, vec![pid]),
+        // clap requires one of the two; this arm keeps the match total.
+        (None, None) => (None, Vec::new()),
+    };
+    if pids.is_empty() {
+        return emit_profile(
+            &profile_analysis::ProfileDocument::measured(container, pids, seconds, hz).unavailable(
+                "no live process matched the target",
+                "a stopped container has no PID to sample; check `sarf top --containers --since 15m`",
+            ),
+        );
+    }
+    let temp = std::env::temp_dir().join(format!(
+        "sarf-perf-{}-{}.data",
+        std::process::id(),
+        context.now
+    ));
+    let document = run_perf(&temp, container.as_deref(), &pids, seconds, hz);
+    // perf.data can be megabytes and is useless after parsing; never leave it.
+    let _ = std::fs::remove_file(&temp);
+    emit_profile(&document)
+}
+
+/// Maximum PIDs handed to one `perf record` invocation.
+const PROFILE_MAX_PIDS: usize = profile_analysis::MAX_PIDS;
+/// Longest sampling interval accepted.
+const PROFILE_MAX_SECONDS: u64 = 120;
+/// Highest sampling frequency accepted.
+const PROFILE_MAX_HZ: u64 = 4000;
+/// How far back a container's processes are looked up.
+const PROFILE_PID_WINDOW: &str = "15m";
+
+/// Record and report, mapping every failure to an explicit non-answer.
+fn run_perf(
+    temp: &std::path::Path,
+    container: Option<&str>,
+    pids: &[u32],
+    seconds: u64,
+    hz: u64,
+) -> profile_analysis::ProfileDocument {
+    let document = || {
+        profile_analysis::ProfileDocument::measured(
+            container.map(str::to_string),
+            pids.to_vec(),
+            seconds,
+            hz,
+        )
+    };
+    let pid_list = pids
+        .iter()
+        .take(PROFILE_MAX_PIDS)
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let record = vec![
+        "record".to_string(),
+        "-q".to_string(),
+        "-F".to_string(),
+        hz.to_string(),
+        "-p".to_string(),
+        pid_list,
+        "-o".to_string(),
+        temp.display().to_string(),
+        "--".to_string(),
+        "sleep".to_string(),
+        seconds.to_string(),
+    ];
+    let record = match enrich::run_bounded(
+        "perf",
+        &record,
+        Duration::from_secs(seconds + 30),
+        64 * 1024,
+    ) {
+        Ok(output) => output,
+        Err(Error::Unavailable { .. }) => {
+            return document().unavailable(
+                "perf is not installed on this host",
+                "install linux-tools for the running kernel (Debian/Ubuntu: \
+                 `apt install linux-tools-$(uname -r)`)",
+            );
+        }
+        Err(err) => {
+            return document().unavailable(
+                format!("perf could not be started: {err}"),
+                "run `sarf doctor` and check that the binary is trusted by the host",
+            );
+        }
+    };
+    if !record.success {
+        let reason = if record.timed_out {
+            format!("perf record did not finish within {} s", seconds + 30)
+        } else {
+            record.status.map_or_else(
+                || "perf record was killed by a signal".to_string(),
+                |status| format!("perf record exited with status {status}"),
+            )
+        };
+        return document().unavailable(
+            reason,
+            "run as root, or set /proc/sys/kernel/perf_event_paranoid to 1 (2 allows \
+             only user-space counting); on containers the perf_event_open syscall must \
+             also be permitted by the container's seccomp profile",
+        );
+    }
+    let report = vec![
+        "report".to_string(),
+        "-i".to_string(),
+        temp.display().to_string(),
+        "--stdio".to_string(),
+        "--percent-limit".to_string(),
+        "0.5".to_string(),
+        "--sort".to_string(),
+        "overhead,comm,dso,symbol".to_string(),
+    ];
+    let report = match enrich::run_bounded(
+        "perf",
+        &report,
+        Duration::from_secs(60),
+        enrich::MAX_COMMAND_BYTES,
+    ) {
+        Ok(output) if output.success => output,
+        Ok(output) => {
+            return document().unavailable(
+                format!(
+                    "perf report exited with status {}",
+                    output
+                        .status
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string())
+                ),
+                "the recorded file may be empty; retry with a lower --hz or a longer --seconds",
+            );
+        }
+        Err(err) => {
+            return document().unavailable(
+                format!("perf report could not run: {err}"),
+                "verify that perf and the recorded kernel version match",
+            );
+        }
+    };
+    let top = profile_analysis::parse_report(&report.stdout, profile_analysis::MAX_ENTRIES);
+    let mut document = document();
+    document.top = top;
+    if report.truncated {
+        return document.with_note(
+            "perf report output was truncated at 1 MiB; lower --hz, shorten --seconds, \
+             or sample fewer processes",
+        );
+    }
+    if document.top.is_empty() {
+        return document.with_note(
+            "perf sampled no symbol above 0.5 %; the processes were idle or the \
+             sampling window was too short",
+        );
+    }
+    if document
+        .top
+        .iter()
+        .all(|entry| entry.symbol.starts_with("0x"))
+    {
+        return document.with_note(
+            "every symbol is a raw address: the binaries are stripped. Self time is \
+             still valid, but install debug symbols or build with symbols to see names",
+        );
+    }
+    document
+}
+
+/// Print one profile document; always JSON, always one object.
+fn emit_profile(document: &profile_analysis::ProfileDocument) -> Result<i32> {
+    let text = serde_json::to_string(document)
+        .map_err(|err| Error::Storage(format!("serialize profile: {err}")))?;
+    println!("{text}");
     Ok(0)
 }
 
