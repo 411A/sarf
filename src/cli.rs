@@ -203,6 +203,9 @@ pub enum Command {
         /// Read dossiers stored by the daemon instead of detecting now.
         #[arg(long)]
         stored: bool,
+        /// Print one CSV row per peak instead of the JSON graph document.
+        #[arg(long)]
+        csv: bool,
         /// Write the JSON document to this path instead of stdout.
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,

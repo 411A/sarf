@@ -17,6 +17,7 @@
 //! cgroup). `own` is only computed where containment makes it meaningful.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -47,6 +48,14 @@ const MAX_CONTEXT_EVENTS: usize = 10;
 const MAX_NEAR: usize = 4;
 /// Series points kept for the scope node.
 const MAX_SERIES_POINTS: usize = 12;
+/// Event kinds that can explain a resource peak.
+const IMPORTANT_EVENTS: [&str; 5] = [
+    "incident_opened",
+    "incident_closed",
+    "collect_gap",
+    "integration_degraded",
+    "log_flood",
+];
 /// Event kinds that can explain a resource peak.
 const VITAL_EVENTS: [&str; 12] = [
     "process_started",
@@ -390,9 +399,12 @@ pub struct PeakNode {
     pub name: String,
     /// `host`, `cgroup` or `process`.
     pub kind: String,
-    /// Host PID for processes.
+    /// Host PID for processes (representative when `n > 1`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Number of siblings folded into this node (same executable path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<u32>,
     /// Container id/name when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
@@ -521,7 +533,7 @@ fn detect(
 fn score(peak: &RawPeak) -> f64 {
     let denominator = peak
         .p99
-        .max(metric_floor(peak.metric))
+        .max(metric_floor(peak.metric, peak.base))
         .max(f64::MIN_POSITIVE);
     (peak.peak / denominator).max(1.0)
 }
@@ -566,7 +578,7 @@ fn detect_series(
             // it lasts, so a strict `>` would end the run after one bucket.
             if value >= p99 {
                 let mad = median_absolute_deviation(&sorted, median);
-                let floor = metric_floor(metric).max(policy.mad_k * mad);
+                let floor = metric_floor(metric, median).max(policy.mad_k * mad);
                 if value - median >= floor {
                     candidate = Some((median, p99));
                 }
@@ -645,13 +657,20 @@ fn median_absolute_deviation(sorted: &[f64], median: f64) -> f64 {
     quantile(&deviations, 0.5)
 }
 
-/// Smallest meaningful change per metric, so a near-constant series cannot
-/// report floating-point jitter as a peak.
-const fn metric_floor(metric: Metric) -> f64 {
+/// Smallest meaningful rise for a metric.
+///
+/// Relative to the rolling median as well as absolute, so a container whose
+/// memory wobbles 3 % does not produce a peak, while CPU keeps the operator
+/// example: 10 % steady with a 10.5 % spike is a peak.
+fn metric_floor(metric: Metric, median: f64) -> f64 {
+    let relative = median.abs() * 0.10;
     match metric {
-        Metric::Cpu | Metric::PsiCpu | Metric::PsiMemory | Metric::PsiIo | Metric::Load => 0.5,
-        Metric::Memory => 1024.0 * 1024.0,
-        Metric::IoRead | Metric::IoWrite | Metric::NetRx | Metric::NetTx => 64.0 * 1024.0,
+        Metric::Cpu | Metric::Load => 0.5,
+        Metric::PsiCpu | Metric::PsiMemory | Metric::PsiIo => 2.0f64.max(relative.min(20.0)),
+        Metric::Memory => (1024.0_f64 * 1024.0).max(relative),
+        Metric::IoRead | Metric::IoWrite | Metric::NetRx | Metric::NetTx => {
+            (64.0_f64 * 1024.0).max(relative)
+        }
     }
 }
 
@@ -847,6 +866,81 @@ pub fn merged_document(
     }))
 }
 
+/// One CSV row per peak: the flat summary for scanning. The JSON document keeps
+/// the graph, series and evidence; this keeps what fits in a spreadsheet.
+pub fn csv(document: &serde_json::Value) -> String {
+    let mut out = String::from(
+        "id,metric,scope,container,name,start_ns,end_ns,shape,peak,base,p99,score,starts,exits,logs,errors,nodes,processes\n",
+    );
+    for peak in document
+        .get("peaks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let nodes = peak.get("nodes").and_then(serde_json::Value::as_array);
+        let scope = nodes.and_then(|nodes| nodes.get(1));
+        let activity = peak.get("activity");
+        let processes: Vec<&str> = nodes
+            .into_iter()
+            .flatten()
+            .filter(|node| node.get("kind").and_then(serde_json::Value::as_str) == Some("process"))
+            .filter_map(|node| node.get("name").and_then(serde_json::Value::as_str))
+            .take(3)
+            .collect();
+        let field = |value: &str| csv_field(value);
+        let _ = writeln!(
+            out,
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            field(json_str(peak.get("id"))),
+            field(json_str(peak.get("metric"))),
+            field(json_str(peak.get("scope"))),
+            field(json_str(scope.and_then(|node| node.get("container")))),
+            field(json_str(scope.and_then(|node| node.get("name")))),
+            json_int(peak.get("start_wall_ns")),
+            json_int(peak.get("end_wall_ns")),
+            field(json_str(peak.get("shape"))),
+            json_num(peak.get("peak")),
+            json_num(peak.get("base")),
+            json_num(peak.get("p99")),
+            json_num(peak.get("score")),
+            json_int(activity.and_then(|value| value.get("starts"))),
+            json_int(activity.and_then(|value| value.get("exits"))),
+            json_int(activity.and_then(|value| value.get("logs"))),
+            json_int(activity.and_then(|value| value.get("errors"))),
+            nodes.map_or_else(String::new, |nodes| nodes.len().to_string()),
+            field(&processes.join("|")),
+        );
+    }
+    out
+}
+
+fn json_str(value: Option<&serde_json::Value>) -> &str {
+    value.and_then(serde_json::Value::as_str).unwrap_or("")
+}
+
+fn json_int(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(serde_json::Value::as_i64)
+        .map_or_else(String::new, |number| number.to_string())
+}
+
+fn json_num(value: Option<&serde_json::Value>) -> String {
+    match value.and_then(serde_json::Value::as_f64) {
+        Some(number) if number.fract() == 0.0 => format!("{number:.0}"),
+        Some(number) => format!("{number:.2}"),
+        None => String::new(),
+    }
+}
+
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"', '\n']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_string()
+    }
+}
+
 /// Serialize one dossier into a storage row.
 pub fn dossier_row(dossier: &PeakDossier, now_wall_ns: i64) -> Result<PeakDossierRow> {
     let payload_json = serde_json::to_string(dossier)
@@ -934,6 +1028,7 @@ fn build_dossier(
         name: host_name,
         kind: "host".to_string(),
         pid: None,
+        n: None,
         container: None,
         unit: None,
         value: host_value.map(|value| round_metric(raw.metric, value)),
@@ -959,6 +1054,7 @@ fn build_dossier(
             name: scope_usage.map_or_else(|| raw.entity_id.clone(), |row| row.name.clone()),
             kind: "cgroup".to_string(),
             pid: None,
+            n: None,
             container: scope_usage.and_then(|row| row.container.clone()),
             unit: None,
             value: value.map(|value| round_metric(raw.metric, value)),
@@ -971,7 +1067,7 @@ fn build_dossier(
         edges.push((0, scope_index, EdgeKind::On));
         selected_cgroups.push(scope_index);
 
-        let mut processes: Vec<&EntityUsage> = usage
+        let processes: Vec<&EntityUsage> = usage
             .iter()
             .filter(|row| row.kind == EntityKind::Process)
             .filter(|row| {
@@ -980,33 +1076,18 @@ fn build_dossier(
                     .is_some_and(|meta| meta.cgroup.as_deref() == Some(raw.entity_id.as_str()))
             })
             .collect();
-        processes.sort_by(|left, right| {
-            entity_value(right, raw.metric)
-                .unwrap_or(0.0)
-                .total_cmp(&entity_value(left, raw.metric).unwrap_or(0.0))
-                .then_with(|| left.entity_id.cmp(&right.entity_id))
-        });
         let slots = policy.max_nodes.saturating_sub(nodes.len());
-        for process in processes.into_iter().take(slots) {
-            let meta = process_meta.get(process.entity_id.as_str());
-            let value = entity_value(process, raw.metric);
-            let node_index = nodes.len();
-            index.insert(process.entity_id.clone(), node_index);
-            nodes.push(PeakNode {
-                id: process.entity_id.clone(),
-                name: process.name.clone(),
-                kind: "process".to_string(),
-                pid: meta.map(|meta| meta.pid),
-                container: process.container.clone(),
-                unit: meta.and_then(|meta| meta.unit.clone()),
-                value: value.map(|value| round_metric(raw.metric, value)),
-                share: value.map(|value| round_share(value / host_scale)),
-                own: value.map(|value| round_metric(raw.metric, value)),
-                base: None,
-                series: Vec::new(),
-            });
-            edges.push((scope_index, node_index, EdgeKind::In));
-        }
+        push_process_nodes(
+            &mut nodes,
+            &mut edges,
+            &mut index,
+            &processes,
+            &process_meta,
+            raw.metric,
+            host_scale,
+            |_| Some(scope_index),
+            slots,
+        );
     } else {
         // Host-scoped peak: only entities whose own level rose explain it.
         let mut candidates: Vec<CgroupCandidate<'_>> = Vec::new();
@@ -1038,6 +1119,7 @@ fn build_dossier(
                 name: cgroup.name.clone(),
                 kind: "cgroup".to_string(),
                 pid: None,
+                n: None,
                 container: cgroup.container.clone(),
                 unit: None,
                 value: Some(round_metric(raw.metric, value)),
@@ -1050,8 +1132,9 @@ fn build_dossier(
             selected_cgroups.push(node_index);
         }
 
-        // Processes inside the selected cgroups, ranked by their own value.
-        let mut processes: Vec<(f64, &EntityUsage, Option<usize>)> = usage
+        // Processes inside the selected cgroups, grouped by executable.
+        // Resolve parents before borrowing `nodes`/`index` mutably.
+        let parent_by_entity: HashMap<&str, usize> = usage
             .iter()
             .filter(|row| row.kind == EntityKind::Process)
             .filter_map(|row| {
@@ -1059,41 +1142,25 @@ fn build_dossier(
                     .get(row.entity_id.as_str())
                     .and_then(|meta| meta.cgroup.as_deref())
                     .and_then(|cgroup| index.get(cgroup).copied())?;
-                Some((
-                    entity_value(row, raw.metric).unwrap_or(0.0),
-                    row,
-                    Some(parent),
-                ))
+                Some((row.entity_id.as_str(), parent))
             })
             .collect();
-        processes.sort_by(|left, right| {
-            right
-                .0
-                .total_cmp(&left.0)
-                .then_with(|| left.1.entity_id.cmp(&right.1.entity_id))
-        });
+        let processes: Vec<&EntityUsage> = usage
+            .iter()
+            .filter(|row| parent_by_entity.contains_key(row.entity_id.as_str()))
+            .collect();
         let slots = policy.max_nodes.saturating_sub(nodes.len());
-        for (_, process, parent) in processes.into_iter().take(slots) {
-            let Some(parent) = parent else { continue };
-            let meta = process_meta.get(process.entity_id.as_str());
-            let value = entity_value(process, raw.metric);
-            let node_index = nodes.len();
-            index.insert(process.entity_id.clone(), node_index);
-            nodes.push(PeakNode {
-                id: process.entity_id.clone(),
-                name: process.name.clone(),
-                kind: "process".to_string(),
-                pid: meta.map(|meta| meta.pid),
-                container: process.container.clone(),
-                unit: meta.and_then(|meta| meta.unit.clone()),
-                value: value.map(|value| round_metric(raw.metric, value)),
-                share: value.map(|value| round_share(value / host_scale)),
-                own: value.map(|value| round_metric(raw.metric, value)),
-                base: None,
-                series: Vec::new(),
-            });
-            edges.push((parent, node_index, EdgeKind::In));
-        }
+        push_process_nodes(
+            &mut nodes,
+            &mut edges,
+            &mut index,
+            &processes,
+            &process_meta,
+            raw.metric,
+            host_scale,
+            |process| parent_by_entity.get(process.entity_id.as_str()).copied(),
+            slots,
+        );
     }
 
     // Own value for each cgroup with contained process children.
@@ -1130,7 +1197,14 @@ fn build_dossier(
 
     let activity = query::window_activity(conn, context)?;
     let logs = context_logs(conn, &nodes, context, raw.start_wall_ns)?;
-    let events = context_events(conn, &nodes, context, raw.start_wall_ns)?;
+    let events = context_events(
+        conn,
+        &nodes,
+        &index,
+        &process_meta,
+        context,
+        raw.start_wall_ns,
+    )?;
     let mut near: Vec<NearPeak> = all
         .iter()
         .filter(|other| {
@@ -1201,6 +1275,101 @@ fn build_dossier(
     })
 }
 
+/// Add process nodes grouped by executable, so six `runc` shims are one row.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the node builder needs the graph, the identity map and the policy bounds; a one-use struct would only move the same fields"
+)]
+fn push_process_nodes(
+    nodes: &mut Vec<PeakNode>,
+    edges: &mut Vec<(usize, usize, EdgeKind)>,
+    index: &mut HashMap<String, usize>,
+    processes: &[&EntityUsage],
+    meta: &HashMap<&str, ProcessIdentity>,
+    metric: Metric,
+    host_scale: f64,
+    parent_of: impl Fn(&EntityUsage) -> Option<usize>,
+    slots: usize,
+) {
+    struct Group<'a> {
+        name: String,
+        parent: usize,
+        value: f64,
+        count: u32,
+        representative: &'a EntityUsage,
+        entity_ids: Vec<String>,
+    }
+    let mut groups: Vec<Group<'_>> = Vec::new();
+    let mut lookup: HashMap<(usize, String), usize> = HashMap::new();
+    for process in processes {
+        let Some(parent) = parent_of(process) else {
+            continue;
+        };
+        let name = short_name(&process.name);
+        let value = entity_value(process, metric).unwrap_or(0.0);
+        let key = (parent, name.clone());
+        if let Some(position) = lookup.get(&key) {
+            let group = &mut groups[*position];
+            group.value += value;
+            group.count = group.count.saturating_add(1);
+            group.entity_ids.push(process.entity_id.clone());
+            if value > entity_value(group.representative, metric).unwrap_or(0.0) {
+                group.representative = process;
+            }
+        } else {
+            lookup.insert(key, groups.len());
+            groups.push(Group {
+                name,
+                parent,
+                value,
+                count: 1,
+                representative: process,
+                entity_ids: vec![process.entity_id.clone()],
+            });
+        }
+    }
+    groups.sort_by(|left, right| {
+        right
+            .value
+            .total_cmp(&left.value)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    for group in groups.into_iter().take(slots.max(1)) {
+        let value = (group.value > 0.0).then(|| round_metric(metric, group.value));
+        let node_index = nodes.len();
+        for id in &group.entity_ids {
+            index.insert(id.clone(), node_index);
+        }
+        let identity = meta.get(group.representative.entity_id.as_str());
+        let container = group.representative.container.clone();
+        // The docker scope name embeds the full container id; `container` already
+        // carries the short id, so repeating 64 hex characters adds nothing.
+        let unit = identity
+            .and_then(|meta| meta.unit.clone())
+            .filter(|unit| !(container.is_some() && unit.starts_with("docker-")));
+        nodes.push(PeakNode {
+            id: group.representative.entity_id.clone(),
+            name: group.name,
+            kind: "process".to_string(),
+            pid: identity.map(|meta| meta.pid),
+            n: (group.count > 1).then_some(group.count),
+            container,
+            unit,
+            value,
+            share: value.map(|value| round_share(value / host_scale)),
+            own: value,
+            base: None,
+            series: Vec::new(),
+        });
+        edges.push((group.parent, node_index, EdgeKind::In));
+    }
+}
+
+/// Executable basename: `/usr/local/bin/python3.12` becomes `python3.12`.
+fn short_name(name: &str) -> String {
+    name.rsplit('/').next().unwrap_or(name).trim().to_string()
+}
+
 /// A cgroup candidate while a host peak is being explained: (delta, usage, series,
 /// local baseline, value).
 type CgroupCandidate<'a> = (f64, &'a EntityUsage, Vec<Option<f64>>, Option<f64>, f64);
@@ -1267,15 +1436,28 @@ fn context_logs(
         },
     )?;
     records.sort_by_key(|record| record.wall_ns);
+    // Only lines that belong to the graph: an unrelated container's periodic
+    // info or error is not evidence for this peak.
     let mut selected: Vec<&crate::model::LogRecord> = records
         .iter()
-        .filter(|record| severity_rank(record.level.map(crate::model::Severity::as_str)) <= 1)
+        .filter(|record| {
+            severity_rank(record.level.map(crate::model::Severity::as_str)) <= 1
+                && log_node(nodes, record).is_some()
+        })
         .collect();
     if selected.is_empty() {
         selected = records
             .iter()
-            .filter(|record| !record.message.is_empty())
+            .filter(|record| log_node(nodes, record).is_some())
             .take(MAX_FALLBACK_LOGS)
+            .collect();
+    }
+    if selected.is_empty() {
+        // Nothing attributable at all: keep two errors so it is not blind.
+        selected = records
+            .iter()
+            .filter(|record| severity_rank(record.level.map(crate::model::Severity::as_str)) <= 1)
+            .take(2)
             .collect();
     }
     let mut folded: Vec<PeakLog> = Vec::new();
@@ -1323,6 +1505,8 @@ fn context_logs(
 fn context_events(
     conn: &Connection,
     nodes: &[PeakNode],
+    node_index: &HashMap<String, usize>,
+    meta: &HashMap<&str, ProcessIdentity>,
     context: Window,
     origin_ns: i64,
 ) -> Result<Vec<PeakEvent>> {
@@ -1336,22 +1520,40 @@ fn context_events(
     )?;
     records.sort_by_key(|record| record.wall_ns);
     let mut folded: Vec<PeakEvent> = Vec::new();
-    let mut index: HashMap<(String, String, String), usize> = HashMap::new();
-    for record in records {
+    let mut index: HashMap<(String, String), usize> = HashMap::new();
+    for mut record in records {
         let kind = record.kind.as_str();
         if !VITAL_EVENTS.contains(&kind) {
             continue;
         }
+        let (mut node, pid, mut what) = event_label(record.entity_id.as_deref(), nodes);
+        // A transient process (runc, shim) is attributed through its cgroup when
+        // its lifetime is in the window, so a container restart points at the
+        // container instead of at an orphan PID.
+        if node.is_none() {
+            if let Some(entity) = record.entity_id.as_deref() {
+                node = meta
+                    .get(entity)
+                    .and_then(|meta| meta.cgroup.as_deref())
+                    .and_then(|cgroup| node_index.get(cgroup).copied());
+                if let Some(resolved) = node {
+                    what.clone_from(&nodes[resolved].name);
+                }
+            }
+        }
+        // Drop evidence that belongs to no node, except incidents and gaps:
+        // another container's periodic event is not this peak's story.
+        if node.is_none() && !IMPORTANT_EVENTS.contains(&kind) {
+            continue;
+        }
         let t = record.wall_ns.saturating_sub(origin_ns);
-        let (node, pid, what) = event_label(record.entity_id.as_deref(), nodes);
         // Unattributed process churn is aggregated by kind; the PID adds nothing.
         let key = if node.is_none() && pid.is_some() {
-            (kind.to_string(), String::new(), String::new())
+            (kind.to_string(), String::new())
         } else {
             (
                 kind.to_string(),
-                record.entity_id.clone().unwrap_or_default(),
-                record.payload.to_string(),
+                record.entity_id.take().unwrap_or_default(),
             )
         };
         if let Some(position) = index.get(&key) {
@@ -1696,6 +1898,15 @@ mod tests {
             )
             .unwrap();
         }
+        // An unrelated container's error must not be pulled into this peak.
+        conn.execute(
+            "INSERT INTO logs(wall_ts_ns, entity_id, source_id, stream, level, message,
+                truncated, redacted)
+             VALUES (?1, 'container:zzz', 'docker:unrelated', 'stdout', 'error',
+                'other container exploded', 0, 0)",
+            rusqlite::params![base + 70 * MINUTE_NS + 2],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO events(wall_ts_ns, entity_id, kind, severity, payload_json,
                 provenance, lost_before)
@@ -1795,6 +2006,14 @@ mod tests {
         assert_eq!(error.n, 3, "identical lines fold with a count");
         assert!(error.last_t.is_some());
         assert!(peak.logs.iter().any(|line| line.msg == "slow request"));
+        assert!(
+            !peak
+                .logs
+                .iter()
+                .any(|line| line.msg == "other container exploded"),
+            "unrelated container logs must be excluded: {:?}",
+            peak.logs
+        );
         let started = peak
             .events
             .iter()
@@ -1910,6 +2129,38 @@ mod tests {
                 .contains("no 1-minute rollups"),
             "note: {:?}",
             doc.note
+        );
+    }
+
+    #[test]
+    fn csv_is_one_row_per_peak() {
+        let store = Store::open_in_memory().expect("store");
+        let base = 1_600_000_000_000_000_000i64;
+        seed(&store, base);
+        let window = Window::new(base, base + 86 * MINUTE_NS);
+        let document = merged_document(store.connection(), window, &policy(), 100, None).unwrap();
+        let text = csv(&document);
+        let mut lines = text.lines();
+        assert_eq!(
+            lines.next().expect("header"),
+            "id,metric,scope,container,name,start_ns,end_ns,shape,peak,base,p99,score,starts,exits,logs,errors,nodes,processes"
+        );
+        let rows: Vec<&str> = lines.collect();
+        assert_eq!(
+            rows.len(),
+            document["peak_count"].as_u64().expect("count") as usize
+        );
+        for row in rows {
+            assert_eq!(row.split(',').count(), 18, "row: {row}");
+            assert!(row.contains("utazbot_tgbot") || row.contains("host:a"));
+        }
+        // CSV must be far smaller than the graph document.
+        let json = serde_json::to_string(&document).expect("json");
+        assert!(
+            text.len() * 5 < json.len(),
+            "csv {} json {}",
+            text.len(),
+            json.len()
         );
     }
 

@@ -611,6 +611,31 @@ Three field findings from a 10-container host:
   container view is one command: container cgroups and the processes inside them,
   nothing from the host or system units.
 
+### Amendment 4 - evidence relevance, folded processes, CSV
+
+A 10-peak container document was still ~70 KB, and the bulk was not the graph:
+
+- **Every peak listed other containers' `service_event`s** (each with `n` and a
+  `last_t` tens of seconds away) and periodic `INFO ... FOUND N valid proxies` lines
+  from a container that was not involved. The margin was right; the *scope* was not.
+  Logs are now kept only when they attribute to a graph node; events only when they
+  attribute to a node or are an incident/gap/degradation. Transient processes
+  (`runc`, shims) attribute through their cgroup from the window's lifetimes, so a
+  container restart points at the container instead of an orphan pid.
+- **Six `runc` processes were six nodes**, each with a `/usr/local/bin/...` path and a
+  `docker-<64 hex>.scope` unit. Siblings with the same executable are now one node
+  with `n`, names are basenames, and the docker scope unit is omitted because
+  `container` already carries the id.
+- **Marginal peaks.** PSI 0.5 % and a 3 % memory wobble were reported as peaks because
+  the floor was absolute. Memory/IO/network now need 10 % of the rolling median (or
+  the old absolute floor), and PSI needs 2 percentage points. CPU keeps the operator
+  example: 0.5 pp above a 10 % baseline is a peak.
+- **CSV.** `peaks --csv` emits one row per peak
+  (`id,metric,scope,container,name,start_ns,end_ns,shape,peak,base,p99,score,starts,exits,logs,errors,nodes,processes`).
+  Measured on the fixture: 760 bytes of CSV against 7 015 bytes of JSON for four
+  peaks. JSON remains the graph form; CSV is the scanning form, generated from the
+  same document.
+
 
 
 

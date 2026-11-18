@@ -931,6 +931,7 @@ pub fn peaks(
     since: &str,
     containers_only: bool,
     stored: bool,
+    csv: bool,
     output: Option<&std::path::Path>,
 ) -> Result<i32> {
     let store = context.open_read()?;
@@ -941,40 +942,46 @@ pub fn peaks(
     } else {
         None
     };
-    let text = if stored {
-        serde_json::to_string(&peaks_analysis::stored_document(
+    let document: serde_json::Value = if stored {
+        serde_json::to_value(peaks_analysis::stored_document(
             store.connection(),
             window,
             10_000,
             containers.as_ref(),
         )?)
+        .map_err(|err| Error::Storage(format!("serialize peaks: {err}")))?
     } else if policy.enabled {
         // One document, everything at once: fresh detection merged with the
         // dossiers the daemon stored, deduplicated by id.
-        serde_json::to_string(&peaks_analysis::merged_document(
+        peaks_analysis::merged_document(
             store.connection(),
             window,
             &policy,
             10_000,
             containers.as_ref(),
-        )?)
+        )?
     } else {
         // Disabled is not "no peaks": say so explicitly instead of emitting [].
-        serde_json::to_string(&serde_json::json!({
+        serde_json::json!({
             "schema": peaks_analysis::PEAK_SCHEMA,
             "v": peaks_analysis::PEAK_SCHEMA_VERSION,
             "enabled": false,
             "since_wall_ns": window.since,
             "until_wall_ns": window.until,
-        }))
-    }
-    .map_err(|err| Error::Storage(format!("serialize peaks: {err}")))?;
+        })
+    };
+    let text = if csv {
+        peaks_analysis::csv(&document)
+    } else {
+        serde_json::to_string(&document)
+            .map(|json| format!("{json}\n"))
+            .map_err(|err| Error::Storage(format!("serialize peaks: {err}")))?
+    };
     match output {
         Some(path) => {
-            std::fs::write(path, format!("{text}\n"))
-                .map_err(|err| Error::io(path.to_path_buf(), err))?;
+            std::fs::write(path, &text).map_err(|err| Error::io(path.to_path_buf(), err))?;
         }
-        None => println!("{text}"),
+        None => print!("{text}"),
     }
     Ok(0)
 }

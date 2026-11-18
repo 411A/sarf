@@ -69,6 +69,7 @@ fn every_documented_command_parses() {
         &["sarf", "prune"],
         &["sarf", "peaks", "--since", "72h"],
         &["sarf", "peaks", "--containers", "--since", "72h"],
+        &["sarf", "peaks", "--csv", "--containers", "--since", "24h"],
         &[
             "sarf",
             "top",

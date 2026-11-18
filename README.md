@@ -183,7 +183,7 @@ sarf logs <source|all> [--since 1h] [--grep TEXT] [--level warn]
 sarf report|graph [--since 1h] [--output PATH] [--incident ID] [--service NAME]
 sarf export [--since 24h] [--format csv|json] [--output PATH]
 sarf prune
-sarf peaks [--since 72h] [--containers] [--stored] [--output PATH]   # machine peak dossiers
+sarf peaks [--since 72h] [--containers] [--csv] [--stored] [--output PATH]   # machine peak dossiers
 sarf benchmark [--cycles N] [--fixture-root PATH]
 sarf tools list|show ID|search QUERY
 ```
@@ -245,6 +245,19 @@ It answers "what was consuming the host, and what is related to it?":
 - **72-hour retention.** The daemon detects peaks on its retention cadence and stores
   compact dossiers in `peak_dossiers` (`[peaks].retain_hours`, default 72). They stay
   readable after raw samples expire; `--stored` dumps them alone for debugging.
+- **Only related evidence.** A log line is kept only when it belongs to a graph node
+  (its entity or `docker:<container>` source maps to the container/process that
+  peaked); a lifecycle event only when it maps to a node, or is an incident/gap.
+  Another container's periodic event or error is no longer pulled in. Transient
+  processes are attributed through their cgroup, so a container restart points at
+  the container instead of an orphan PID.
+- **Siblings are folded.** Processes with the same executable are one node with
+  `n` (six `runc` shims are one row, not six), names are basenames, and the docker
+  scope unit (a 64-hex id that `container` already identifies) is omitted.
+- **CSV for scanning.** `--csv` prints one row per peak
+  (`id,metric,scope,container,name,start_ns,end_ns,shape,peak,base,p99,score,starts,exits,logs,errors,nodes,processes`),
+  ~100 bytes per peak. JSON stays the graph form; CSV is the spreadsheet form.
+  Both come from the same document, so they cannot disagree.
 
 ```json
 {"schema":"sarf.peak","v":3,"peak_count":1,

@@ -374,8 +374,16 @@ pub fn main() -> Result<i32> {
             since,
             containers,
             stored,
+            csv,
             output,
-        } => query::peaks(&context, since, *containers, *stored, output.as_deref()),
+        } => query::peaks(
+            &context,
+            since,
+            *containers,
+            *stored,
+            *csv,
+            output.as_deref(),
+        ),
         Command::Benchmark {
             cycles,
             fixture_root,
